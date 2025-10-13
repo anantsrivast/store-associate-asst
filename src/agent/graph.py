@@ -26,7 +26,6 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
         memory_namespace = ("customers", customer_id, "memories")
         
         # Create memory tools using LangGraph store
-    
         @create_tool
         def manage_memory(content: str) -> str:
             """
@@ -74,7 +73,8 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
                 return f"Successfully saved memory: {content[:100]}..."
             except Exception as e:
                 logger.error(f"Error saving memory: {e}", exc_info=True)
-                return f"Error saving memory: {str(e)}"    
+                return f"Error saving memory: {str(e)}"
+        
         @create_tool
         def search_memory(query: str) -> str:
             """
@@ -119,7 +119,6 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
             except Exception as e:
                 logger.error(f"Error searching memories: {e}", exc_info=True)
                 return f"Error searching memories: {str(e)}"
-        
         
         # Enhanced system prompt with clear tool selection guidelines
         system_prompt = f"""You are a helpful and friendly store associate at a retail store.
@@ -208,7 +207,7 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
         
         llm_with_tools = llm.bind_tools(tools)
         
-        # Prepare messages with system prompt
+        # Prepare initial messages with system prompt
         full_messages = [
             {"role": "system", "content": system_prompt}
         ]
@@ -221,15 +220,27 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                 elif msg.__class__.__name__ == 'AIMessage':
                     full_messages.append({"role": "assistant", "content": msg.content})
         
-        # Get response from LLM
-        response = llm_with_tools.invoke(full_messages)
+        # ============= AGENT LOOP FOR MULTI-TOOL CALLS =============
+        max_iterations = 5
+        current_messages = messages.copy()
         
-        # Handle tool calls if present
-        if hasattr(response, 'tool_calls') and response.tool_calls:
+        for iteration in range(max_iterations):
+            logger.info(f"Agent iteration {iteration + 1}/{max_iterations}")
+            
+            # Get response from LLM
+            response = llm_with_tools.invoke(full_messages)
+            current_messages.append(response)
+            
+            # Check if there are tool calls
+            if not (hasattr(response, 'tool_calls') and response.tool_calls):
+                # No tool calls - agent is done
+                logger.info(f"Agent completed after {iteration + 1} iteration(s)")
+                break
+            
+            # Execute tool calls
             logger.info(f"Agent wants to call {len(response.tool_calls)} tool(s)")
             
-            # Execute each tool call
-            tool_results = []
+            tool_messages = []
             for tool_call in response.tool_calls:
                 tool_name = tool_call['name']
                 tool_args = tool_call['args']
@@ -246,47 +257,42 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                 if tool_to_execute:
                     try:
                         result = tool_to_execute.invoke(tool_args)
-                        tool_results.append({
-                            "tool_call_id": tool_call['id'],
-                            "result": result
-                        })
+                        tool_messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_call['id']
+                            )
+                        )
                         logger.info(f"Tool {tool_name} executed successfully")
                     except Exception as e:
                         logger.error(f"Error executing tool {tool_name}: {e}")
                         import traceback
                         traceback.print_exc()
-                        tool_results.append({
-                            "tool_call_id": tool_call['id'],
-                            "error": str(e)
-                        })
+                        tool_messages.append(
+                            ToolMessage(
+                                content=f"Error: {str(e)}",
+                                tool_call_id=tool_call['id']
+                            )
+                        )
             
-            # Create tool result messages
-            tool_messages = []
-            for tr in tool_results:
-                tool_messages.append(
-                    ToolMessage(
-                        content=str(tr.get("result", tr.get("error"))),
-                        tool_call_id=tr["tool_call_id"]
-                    )
-                )
+            # Add tool results to messages
+            current_messages.extend(tool_messages)
             
-            # Add original response and tool results to messages
-            state["messages"] = messages + [response] + tool_messages
-            
-            # Get final response after tool execution
-            final_response = llm_with_tools.invoke(
-                full_messages + [
-                    {"role": "assistant", "content": response.content, "tool_calls": response.tool_calls}
-                ] + [
-                    {"role": "tool", "content": str(tm.content), "tool_call_id": tm.tool_call_id}
-                    for tm in tool_messages
-                ]
-            )
-            
-            state["messages"] = state["messages"] + [final_response]
-        else:
-            # No tool calls, just add the response
-            state["messages"] = messages + [response]
+            # Update full_messages for next iteration
+            full_messages.append({
+                "role": "assistant", 
+                "content": response.content if response.content else "",
+                "tool_calls": response.tool_calls
+            })
+            for tm in tool_messages:
+                full_messages.append({
+                    "role": "tool", 
+                    "content": str(tm.content), 
+                    "tool_call_id": tm.tool_call_id
+                })
+        
+        # Update state with all messages
+        state["messages"] = current_messages
         
         logger.info("Agent response generated successfully")
         return state
@@ -296,14 +302,11 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
         import traceback
         traceback.print_exc()
         
-        # Add error message to conversation
         error_message = AIMessage(
             content="I apologize, but I encountered an error. Please try again."
         )
         state["messages"] = state["messages"] + [error_message]
         return state
-
-
 def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
     Background memory extraction - disabled for now.
