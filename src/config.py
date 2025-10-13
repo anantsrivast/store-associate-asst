@@ -1,7 +1,12 @@
+
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
+
+# Explicitly load .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
 
 
 class MemoryConfig(BaseSettings):
@@ -110,9 +115,6 @@ class LLMConfig(BaseSettings):
         default=4096,
         description="Maximum tokens in LLM response"
     )
-    
-    class Config:
-        env_prefix = "LLM_"
 
 
 class AppConfig(BaseSettings):
@@ -152,13 +154,7 @@ class Config:
     """
     
     def __init__(self):
-        # Load environment variables from .env file
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-        except ImportError:
-            pass  # dotenv is optional
-        
+        # dotenv is already loaded at module level
         # Initialize sub-configurations
         self.mongodb = MongoDBConfig()
         self.memory = MemoryConfig()

@@ -250,7 +250,14 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
         messages = state["messages"]
         
         logger.info(f"Agent processing query for customer {customer_id}")
+        latest_message = messages[-1].content if messages else ""
         
+        # ADD THIS DEBUG
+        logger.info(f"=== AGENT DECISION DEBUG ===")
+        logger.info(f"User asked: {latest_message}")
+        logger.info(f"Customer ID: {customer_id}")
+        logger.info(f"Available tools: {[tool.name for tool in tools]}")
+        logger.info(f"=== END DEBUG ===")
         # Create memory tools for this customer
         memory_namespace = ("customers", customer_id, "memories")
         
