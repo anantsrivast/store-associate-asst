@@ -1,7 +1,5 @@
-
 from langchain_core.tools import tool
-from langchain_core.messages import BaseMessage
-from typing import List, Dict, Any
+from typing import Dict, Any, List, Optional
 from src.database.mongodb_client import db_manager
 from src.config import config
 import logging
@@ -10,9 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 @tool
-def search_products(query: str, category: str = None, max_results: int = 5) -> List[Dict[str, Any]]:
+def search_products(
+    query: str, 
+    category: Optional[str] = None, 
+    max_results: int = 10
+) -> List[Dict[str, Any]]:
     """
-    Search for products in the catalog.
+    Search for products in the store catalog.
     
     Use this tool when the customer asks about products or you need
     to find product information.
@@ -41,7 +43,7 @@ def search_products(query: str, category: str = None, max_results: int = 5) -> L
         products = list(collection.find(
             search_filter,
             limit=max_results
-        ).sort("price", 1))  # Sort by price ascending
+        ).sort("price", 1))
         
         # Format results
         results = []
@@ -52,7 +54,7 @@ def search_products(query: str, category: str = None, max_results: int = 5) -> L
                 "brand": product.get("brand"),
                 "category": product.get("category"),
                 "price": product.get("price"),
-                "description": product.get("description", "")[:200],  # Truncate
+                "description": product.get("description", "")[:200],
                 "variants": product.get("variants", [])
             })
         
@@ -67,16 +69,19 @@ def search_products(query: str, category: str = None, max_results: int = 5) -> L
 @tool
 def get_customer_profile(customer_id: str) -> Dict[str, Any]:
     """
-    Retrieve customer profile information.
+    Retrieve customer profile information including shoe size, preferences, and contact details.
     
-    Use this to get basic customer details like loyalty tier,
-    contact information, and account status.
+    Use this to get structured customer data like:
+    - Shoe size
+    - Preferred brands
+    - Loyalty tier
+    - Contact information
     
     Args:
         customer_id: Customer identifier
         
     Returns:
-        Customer profile dictionary
+        Customer profile dictionary with all structured data
     """
     try:
         collection = db_manager.get_collection(config.mongodb.customers_collection)
@@ -98,7 +103,62 @@ def get_customer_profile(customer_id: str) -> Dict[str, Any]:
 
 
 @tool
-def get_purchase_history(customer_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+def update_customer_profile(
+    customer_id: str,
+    updates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Update customer profile with structured data like shoe size, preferences, etc.
+    
+    Use this when the customer shares factual information about themselves:
+    - Shoe size: updates["shoe_size"] = 8
+    - Preferred brands: updates["preferred_brands"] = ["Nike", "Adidas"]
+    - Budget range: updates["budget_range"] = "$100-150"
+    - Style preferences: updates["style_preferences"] = ["casual", "athletic"]
+    
+    Args:
+        customer_id: Customer identifier
+        updates: Dictionary of fields to update
+        
+    Returns:
+        Success/failure message
+    """
+    try:
+        collection = db_manager.get_collection(config.mongodb.customers_collection)
+        
+        # Update the customer document
+        result = collection.update_one(
+            {"customer_id": customer_id},
+            {"$set": updates}
+        )
+        
+        if result.modified_count > 0:
+            logger.info(f"Updated customer {customer_id} with: {updates}")
+            return {
+                "success": True,
+                "message": f"Successfully updated customer profile",
+                "updated_fields": list(updates.keys())
+            }
+        else:
+            logger.warning(f"No updates made for customer {customer_id}")
+            return {
+                "success": False,
+                "message": "Customer not found or no changes made"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error updating customer profile: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@tool
+def get_purchase_history(
+    customer_id: str, 
+    limit: int = 10
+) -> List[Dict[str, Any]]:
     """
     Get customer's purchase history.
     
@@ -107,7 +167,7 @@ def get_purchase_history(customer_id: str, limit: int = 10) -> List[Dict[str, An
     
     Args:
         customer_id: Customer identifier
-        limit: Maximum number of recent purchases to return
+        limit: Maximum number of purchases to return
         
     Returns:
         List of purchase dictionaries
@@ -117,12 +177,12 @@ def get_purchase_history(customer_id: str, limit: int = 10) -> List[Dict[str, An
         
         purchases = list(collection.find(
             {"customer_id": customer_id}
-        ).sort("date", -1).limit(limit))  # Most recent first
+        ).sort("purchase_date", -1).limit(limit))
         
         # Format results
         results = []
         for purchase in purchases:
-            purchase.pop("_id", None)  # Remove MongoDB _id
+            purchase.pop("_id", None)
             results.append(purchase)
         
         logger.info(f"Retrieved {len(results)} purchases for customer {customer_id}")
@@ -131,8 +191,3 @@ def get_purchase_history(customer_id: str, limit: int = 10) -> List[Dict[str, An
     except Exception as e:
         logger.error(f"Error retrieving purchase history: {e}")
         return []
-
-
-# Note: Memory tools (search_memory_tool, manage_memory_tool) are created
-# dynamically by LangMem and added to the agent in the graph definition
-

@@ -1,14 +1,9 @@
-
-
-from typing import Optional
 from pymongo import MongoClient
 from pymongo.database import Database
 from pymongo.collection import Collection
 from langgraph.checkpoint.mongodb import MongoDBSaver
-from langgraph.store.mongodb import MongoDBStore, VectorIndexConfig
-from langchain_openai import OpenAIEmbeddings
+from langgraph.store.mongodb import MongoDBStore
 from src.config import config
-from src.database.schemas import MongoDBSchemas
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,229 +11,142 @@ logger = logging.getLogger(__name__)
 
 class MongoDBClientManager:
     """
-    Manages MongoDB connections and provides access to collections,
-    checkpointer, and store.
-
-    This is a singleton class that maintains a single MongoDB connection
-    throughout the application lifecycle.
-
-    Usage:
-        # Get the singleton instance
-        db_manager = MongoDBClientManager()
-
-        # Get collections
-        customers = db_manager.get_collection("customers")
-
-        # Get LangGraph components
-        checkpointer = db_manager.get_checkpointer()
-        store = db_manager.get_store()
+    Manages MongoDB connections for the Store Associate Agent.
+    
+    Provides:
+    - Database and collection access
+    - MongoDBSaver for conversation checkpoints (short-term memory)
+    - MongoDBStore for long-term memory with vector search
     """
-
-    _instance: Optional['MongoDBClientManager'] = None
-    _client: Optional[MongoClient] = None
-    _db: Optional[Database] = None
-
-    def __new__(cls):
-        """Singleton pattern to ensure only one instance exists"""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
+    
     def __init__(self):
-        """Initialize the MongoDB client if not already initialized"""
+        self._client: Optional[MongoClient] = None
+        self._db: Optional[Database] = None
+        self._checkpointer: Optional[MongoDBSaver] = None
+        self._store: Optional[MongoDBStore] = None
+    
+    def get_client(self) -> MongoClient:
+        """Get or create MongoDB client"""
         if self._client is None:
-            self._connect()
-
-    def _connect(self):
-        """
-        Establish connection to MongoDB.
-
-        Creates the client, selects the database, and initializes
-        all required collections with proper schemas and indexes.
-        """
-        try:
-            logger.info(f"Connecting to MongoDB at {config.mongodb.uri}")
-
-            # Create MongoDB client with connection pooling
             self._client = MongoClient(
                 config.mongodb.uri,
-                maxPoolSize=50,  # Maximum concurrent connections
-                minPoolSize=10,  # Minimum idle connections
-                serverSelectionTimeoutMS=5000,  # 5 second timeout
+                serverSelectionTimeoutMS=5000
             )
-
-            # Select database
-            self._db = self._client[config.mongodb.db_name]
-
-            # Test connection
-            self._client.admin.command('ping')
-            logger.info("Successfully connected to MongoDB")
-
-        except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
-            raise
-
-    def setup_collections(self):
-        """
-        Create all collections with proper schemas and indexes.
-
-        This should be called once during application setup.
-        It's idempotent - safe to call multiple times.
-        """
-        try:
-            # Setup customers collection
-            self._setup_customers_collection()
-
-            # Setup products collection
-            self._setup_products_collection()
-
-            # Setup purchases collection
-            self._setup_purchases_collection()
-
-            # Setup memories collection (for LangGraph Store)
-            self._setup_memories_collection()
-
-            logger.info("All collections setup successfully")
-
-        except Exception as e:
-            logger.error(f"Error setting up collections: {e}")
-            raise
-
-    def _setup_customers_collection(self):
-        """Setup customers collection with schema and indexes"""
-        collection_name = config.mongodb.customers_collection
-
-        # Create collection if it doesn't exist
-        if collection_name not in self._db.list_collection_names():
-            self._db.create_collection(
-                collection_name,
-                **MongoDBSchemas.get_customer_schema()
-            )
-            logger.info(f"Created {collection_name} collection")
-
-        # Create indexes
-        collection = self._db[collection_name]
-        collection.create_indexes(MongoDBSchemas.get_customer_indexes())
-        logger.info(f"Created indexes for {collection_name}")
-
-    def _setup_products_collection(self):
-        """Setup products collection with schema and indexes"""
-        collection_name = config.mongodb.products_collection
-
-        if collection_name not in self._db.list_collection_names():
-            self._db.create_collection(
-                collection_name,
-                **MongoDBSchemas.get_product_schema()
-            )
-            logger.info(f"Created {collection_name} collection")
-
-        collection = self._db[collection_name]
-        collection.create_indexes(MongoDBSchemas.get_product_indexes())
-        logger.info(f"Created indexes for {collection_name}")
-
-    def _setup_purchases_collection(self):
-        """Setup purchases collection with schema and indexes"""
-        collection_name = config.mongodb.purchases_collection
-
-        if collection_name not in self._db.list_collection_names():
-            self._db.create_collection(
-                collection_name,
-                **MongoDBSchemas.get_purchase_schema()
-            )
-            logger.info(f"Created {collection_name} collection")
-
-        collection = self._db[collection_name]
-        collection.create_indexes(MongoDBSchemas.get_purchase_indexes())
-        logger.info(f"Created indexes for {collection_name}")
-
-    def _setup_memories_collection(self):
-        """
-        Setup customer_memories collection for LangGraph Store.
-
-        This collection stores long-term memories with vector embeddings
-        for semantic search.
-        """
-        collection_name = config.mongodb.memories_collection
-
-        # Create collection (no schema validation for flexibility)
-        if collection_name not in self._db.list_collection_names():
-            self._db.create_collection(collection_name)
-            logger.info(f"Created {collection_name} collection")
-
-        collection = self._db[collection_name]
-
-        # Create TTL index for automatic memory expiration
-        collection.create_indexes([MongoDBSchemas.get_memories_ttl_index()])
-        logger.info(f"Created TTL index for {collection_name}")
-
-        # Note: Vector search index must be created in MongoDB Atlas UI
-        # or via Atlas API. It cannot be created via pymongo.
-        logger.info(
-            f"Remember to create Atlas Vector Search index on {collection_name}"
-        )
-
-    def get_collection(self, collection_name: str) -> Collection:
-        """
-        Get a MongoDB collection by name.
-
-        Args:
-            collection_name: Name of the collection
-
-        Returns:
-            Collection object
-        """
+            logger.info("MongoDB client connected")
+        return self._client
+    
+    def get_database(self) -> Database:
+        """Get the main database"""
         if self._db is None:
-            raise RuntimeError("Database not initialized")
-        return self._db[collection_name]
-
-    def get_checkpointer(self):
-      from langgraph.checkpoint.mongodb import MongoDBSaver
-      from pymongo import MongoClient
+            client = self.get_client()
+            self._db = client[config.mongodb.database]
+            logger.info(f"Connected to database: {config.mongodb.database}")
+        return self._db
+    
+    def get_collection(self, collection_name: str) -> Collection:
+        """Get a specific collection"""
+        db = self.get_database()
+        return db[collection_name]
+    
+    def get_checkpointer(self) -> MongoDBSaver:
+        """
+        Get LangGraph checkpointer for conversation state (short-term memory).
         
-        # Create a dedicated client for the checkpointer
-      client = MongoClient(
-            config.mongodb.uri,
-            maxPoolSize=50,
-            minPoolSize=10,
-            serverSelectionTimeoutMS=5000
-        )
-        
-        # Create checkpointer with correct parameter name
-      return MongoDBSaver(
-            client=client,  # Use 'client' not 'conn'
-            db_name=config.mongodb.db_name
-        )
+        This stores the current conversation messages and enables:
+        - Conversation resumption
+        - Time travel debugging
+        - Human-in-the-loop workflows
+        """
+        if self._checkpointer is None:
+            self._checkpointer = MongoDBSaver.from_conn_string(
+                conn_string=config.mongodb.uri,
+                db_name=config.mongodb.database,
+                collection_name=config.mongodb.checkpoints_collection
+            )
+            logger.info("MongoDBSaver checkpointer initialized")
+        return self._checkpointer
+    
     def get_store(self) -> MongoDBStore:
-        from langchain_openai import OpenAIEmbeddings
-        from langgraph.store.mongodb import VectorIndexConfig
+        """
+        Get LangGraph store for long-term memory with vector search.
         
-        collection = self.get_collection(config.mongodb.memories_collection)
+        The store provides:
+        - Namespace-based memory organization
+        - Vector search for semantic retrieval
+        - Cross-session persistence
         
-        # Configure embeddings properly
-        if config.llm.openai_api_key:
+        Returns:
+            MongoDBStore instance configured with vector search
+        """
+        if self._store is None:
+            from langchain_openai import OpenAIEmbeddings
+            
+            collection = self.get_collection(config.mongodb.memories_collection)
+            
+            # Configure embeddings for vector search
             embeddings = OpenAIEmbeddings(
                 model="text-embedding-3-small",
                 openai_api_key=config.llm.openai_api_key
             )
             
-            # Create proper index config
+            # Create index_config with all required fields
             index_config = {
-                "dims": 1536,
-                "embed": embeddings
+                "fields": ["value"],  # Fields to index for vector search
+                "dims": 1536,  # text-embedding-3-small produces 1536-dim vectors
+                "embed": embeddings.embed_query,  # Embedding function
+                "filters": []  # Additional filters (empty list)
             }
             
-            return MongoDBStore(
+            # Initialize store with embeddings and increased timeout
+            self._store = MongoDBStore(
                 collection=collection,
-                index=index_config  # Note: 'index' not 'index_config'
+                index_config=index_config,
+                index_timeout=100  # Increased timeout to 100 seconds
             )
-        else:
-            logger.warning("No OpenAI key - vector search disabled")
-            return MongoDBStore(collection=collection)
-        def close(self):
-            """Close the MongoDB connection"""
-            if self._client:
-                self._client.close()
-                logger.info("MongoDB connection closed")
+            
+            logger.info("MongoDBStore initialized with vector search capabilities")
+        
+        return self._store
+    
+    def setup_collections(self):
+        """
+        Set up MongoDB collections with indexes.
+        
+        Creates necessary indexes for:
+        - Text search on products
+        - Customer lookups
+        - Purchase history queries
+        """
+        try:
+            db = self.get_database()
+            
+            # Products collection - text index for search
+            products_collection = db[config.mongodb.products_collection]
+            products_collection.create_index([
+                ("name", "text"),
+                ("description", "text"),
+                ("brand", "text")
+            ], name="product_search_index")
+            
+            # Customers collection - index on customer_id
+            customers_collection = db[config.mongodb.customers_collection]
+            customers_collection.create_index("customer_id", unique=True)
+            
+            # Purchases collection - indexes for queries
+            purchases_collection = db[config.mongodb.purchases_collection]
+            purchases_collection.create_index("customer_id")
+            purchases_collection.create_index("purchase_date")
+            
+            logger.info("MongoDB collections and indexes created successfully")
+            
+        except Exception as e:
+            logger.warning(f"Error setting up collections (may already exist): {e}")
+    
+    def close(self):
+        """Close the MongoDB connection"""
+        if self._client:
+            self._client.close()
+            logger.info("MongoDB connection closed")
 
 
 # Global instance
