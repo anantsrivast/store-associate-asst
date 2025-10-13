@@ -17,15 +17,15 @@ logger = logging.getLogger(__name__)
 def create_summarization_node():
     """
     Create the conversation summarization node.
-    
+
     This node compresses long conversations to fit within context limits.
     It uses LangMem's SummarizationNode to create rolling summaries.
-    
+
     Returns:
         SummarizationNode instance configured for our use case
     """
     model = init_chat_model(config.llm.model)
-    
+
     return SummarizationNode(
         token_counter=count_tokens_approximately,
         model=model.bind(max_tokens=config.memory.max_summary_tokens),
@@ -38,33 +38,33 @@ def create_summarization_node():
 def check_summarization_node(state: AgentState) -> AgentState:
     """
     Check if conversation needs summarization.
-    
+
     This node counts tokens in the conversation and sets a flag
     if summarization is needed.
-    
+
     Args:
         state: Current agent state
-        
+
     Returns:
         Updated state with needs_summarization flag set
     """
     try:
         # Count tokens in the conversation
         token_count = count_tokens_approximately(state["messages"])
-        
+
         logger.info(f"Current conversation has {token_count} tokens")
-        
+
         # Check if we exceed the threshold
         needs_summary = token_count > config.memory.summarization_threshold
-        
+
         # Update state
         state["needs_summarization"] = needs_summary
-        
+
         if needs_summary:
             logger.info("Conversation exceeds threshold, will summarize")
-        
+
         return state
-        
+
     except Exception as e:
         logger.error(f"Error in check_summarization_node: {e}")
         # Continue without summarization on error
@@ -75,15 +75,15 @@ def check_summarization_node(state: AgentState) -> AgentState:
 def summarize_conversation_node(state: AgentState) -> AgentState:
     """
     Compress the conversation using rolling summarization.
-    
+
     This node is called when the conversation gets too long. It:
     1. Creates a summary of older messages
     2. Keeps recent messages intact
     3. Stores the summary in state["context"]
-    
+
     Args:
         state: Current agent state
-        
+
     Returns:
         Updated state with compressed conversation
     """
@@ -91,85 +91,85 @@ def summarize_conversation_node(state: AgentState) -> AgentState:
         if not state.get("needs_summarization", False):
             # No summarization needed
             return state
-        
+
         logger.info("Starting conversation summarization")
-        
+
         # Get or create summarization node
         summarization_node = create_summarization_node()
-        
+
         # Apply summarization
         # This modifies state["context"] with running summary
         summarized_state = summarization_node(state)
-        
+
         logger.info("Conversation summarized successfully")
-        
+
         return summarized_state
-        
+
     except Exception as e:
         logger.error(f"Error in summarize_conversation_node: {e}")
         # Return original state on error
         return state
 
 
-def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
+def agent_node_1(state: AgentState, store: MongoDBStore) -> AgentState:
     """
     Main agent node that processes user queries.
-    
+
     This is the core of the agent. It:
     1. Retrieves relevant memories from the store
     2. Builds context from memories and conversation
     3. Calls the LLM to generate a response
     4. Returns the response in updated state
-    
+
     Args:
         state: Current agent state
         store: MongoDBStore for accessing memories
-        
+
     Returns:
         Updated state with agent's response
     """
     try:
         customer_id = state["customer_id"]
         messages = state["messages"]
-        
+
         # Get the latest user message
         latest_message = messages[-1].content if messages else ""
-        
+
         logger.info(f"Agent processing query for customer {customer_id}")
-        
+
         # Retrieve relevant memories
         # 1. Search episodic memories (past interactions)
         episodic_memories = store.search(
-            namespace_prefix=("customers", customer_id, "episodes"),
+            ("customers", customer_id, "episodes"),
             query=latest_message,
             limit=3
         )
-        
+
         # 2. Get semantic facts (preferences)
         semantic_memories = store.search(
-            namespace_prefix=("customers", customer_id, "preferences"),
+            ("customers", customer_id, "preferences"),
             limit=10
         )
-        
+
         # 3. Get consolidated insights
         insights = store.search(
-            namespace_prefix=("customers", customer_id, "insights"),
+            ("customers", customer_id, "insights"),
             limit=5
         )
-        
+
         logger.info(
             f"Retrieved {len(episodic_memories)} episodes, "
             f"{len(semantic_memories)} preferences, "
             f"{len(insights)} insights"
         )
-        
+
         # Build memory context for the LLM
         memory_context = _build_memory_context(
             episodic_memories,
             semantic_memories,
             insights
         )
-        
+
         # Create system prompt with memory context
         system_prompt = f"""You are a helpful store associate at a retail store.
         
@@ -187,22 +187,22 @@ Guidelines:
 
 Current conversation:
 """
-        
+
         # Initialize LLM
         model = init_chat_model(
             config.llm.model,
             temperature=config.llm.temperature,
             max_tokens=config.llm.max_tokens
         )
-        
+
         # Bind tools to the model
         from src.agent.tools import search_products, get_customer_profile, get_purchase_history
         from langmem import create_manage_memory_tool, create_search_memory_tool
-        
+
         # Create memory tools
         manage_memory = create_manage_memory_tool()
         search_memory = create_search_memory_tool()
-        
+
         tools = [
             search_products,
             get_customer_profile,
@@ -210,24 +210,24 @@ Current conversation:
             manage_memory,
             search_memory
         ]
-        
+
         model_with_tools = model.bind_tools(tools)
-        
+
         # Prepare messages with system prompt
         llm_messages = [
             HumanMessage(content=system_prompt)
         ] + messages
-        
+
         # Get response from LLM
         response = model_with_tools.invoke(llm_messages)
-        
+
         # Add response to messages
         state["messages"] = messages + [response]
-        
+
         logger.info("Agent response generated successfully")
-        
+
         return state
-        
+
     except Exception as e:
         logger.error(f"Error in agent_node: {e}")
         # Add error message to conversation
@@ -238,26 +238,69 @@ Current conversation:
         return state
 
 
+def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
+    """Main agent node - simplified version"""
+    try:
+        from langchain_core.messages import AIMessage
+        from langchain.chat_models import init_chat_model
+
+        customer_id = state["customer_id"]
+        messages = state["messages"]
+
+        logger.info(f"Agent processing query for customer {customer_id}")
+
+        # Simple system prompt without memories for now
+        system_prompt = """You are a helpful store associate at a retail store.
+        Be friendly, helpful, and professional."""
+
+        # Initialize LLM
+        model = init_chat_model(
+            config.llm.model,
+            temperature=config.llm.temperature,
+            max_tokens=config.llm.max_tokens
+        )
+
+        # Get response from LLM
+        from langchain_core.messages import SystemMessage
+        llm_messages = [SystemMessage(content=system_prompt)] + messages
+        response = model.invoke(llm_messages)
+
+        # Add response to messages
+        state["messages"] = messages + [response]
+
+        logger.info("Agent response generated successfully")
+        return state
+
+    except Exception as e:
+        logger.error(f"Error in agent_node: {e}")
+        from langchain_core.messages import AIMessage
+        error_message = AIMessage(
+            content="I apologize, but I encountered an error. Please try again."
+        )
+        state["messages"] = state["messages"] + [error_message]
+        return state
+
+
 def _build_memory_context(episodic, semantic, insights) -> str:
     """
     Build a formatted memory context string for the LLM.
-    
+
     Args:
         episodic: List of episodic memories
         semantic: List of semantic memories
         insights: List of consolidated insights
-        
+
     Returns:
         Formatted string with memory context
     """
     context_parts = []
-    
+
     # Add episodic memories
     if episodic:
         context_parts.append("## Past Interactions:")
         for memory in episodic[:2]:  # Limit to 2 most relevant
             context_parts.append(f"- {memory.value.get('summary', 'N/A')}")
-    
+
     # Add semantic preferences
     if semantic:
         context_parts.append("\n## Customer Preferences:")
@@ -265,52 +308,52 @@ def _build_memory_context(episodic, semantic, insights) -> str:
             pref_type = memory.value.get('preference_type', 'unknown')
             value = memory.value.get('value', 'N/A')
             context_parts.append(f"- {pref_type}: {value}")
-    
+
     # Add consolidated insights
     if insights:
         context_parts.append("\n## Behavioral Patterns:")
         for insight in insights[:2]:  # Limit to 2 most relevant
             pattern = insight.value.get('pattern', 'N/A')
             context_parts.append(f"- {pattern}")
-    
+
     return "\n".join(context_parts) if context_parts else "No previous memory available."
 
 
 def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
     Extract semantic memories from the conversation (real-time).
-    
+
     This node runs during the conversation (hot path) to capture
     important facts and preferences as they're mentioned.
-    
+
     Args:
         state: Current agent state
         store: MongoDBStore for storing memories
-        
+
     Returns:
         Updated state (unchanged, memories stored in background)
     """
     try:
         customer_id = state["customer_id"]
         messages = state["messages"]
-        
+
         # Only process if we have recent messages
         if len(messages) < 2:
             return state
-        
+
         logger.info("Extracting semantic memories from recent messages")
-        
+
         # Get semantic memory manager
         semantic_manager = MemoryManagers.get_semantic_manager()
-        
+
         # Extract memories from last 2 messages (user + assistant)
         recent_messages = messages[-2:]
         extracted_memories = semantic_manager.extract_memories(
             messages=recent_messages
         )
-        
+
         logger.info(f"Extracted {len(extracted_memories)} semantic memories")
-        
+
         # Store each memory in the preferences namespace
         for memory in extracted_memories:
             store.put(
@@ -326,13 +369,13 @@ def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> Ag
                     "times_observed": memory.times_observed
                 }
             )
-            
+
             logger.info(
                 f"Stored preference: {memory.preference_type} = {memory.value}"
             )
-        
+
         return state
-        
+
     except Exception as e:
         logger.error(f"Error in extract_semantic_memories_node: {e}")
         # Don't fail the flow on memory extraction errors
@@ -342,16 +385,16 @@ def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> Ag
 def create_episode_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
     Create an episode summary when the conversation ends.
-    
+
     This node runs when session_active becomes False. It:
     1. Summarizes the entire conversation
     2. Extracts key information
     3. Stores the episode with embeddings for future search
-    
+
     Args:
         state: Current agent state
         store: MongoDBStore for storing episodes
-        
+
     Returns:
         Updated state (unchanged, episode stored in background)
     """
@@ -359,30 +402,30 @@ def create_episode_node(state: AgentState, store: MongoDBStore) -> AgentState:
         # Only create episode if session is ending
         if state.get("session_active", True):
             return state
-        
+
         customer_id = state["customer_id"]
         messages = state["messages"]
-        
+
         logger.info(f"Creating episode summary for customer {customer_id}")
-        
+
         # Get episode memory manager
         episode_manager = MemoryManagers.get_episode_manager()
-        
+
         # Extract episode from full conversation
         episodes = episode_manager.extract_memories(messages=messages)
-        
+
         if not episodes:
             logger.warning("No episode extracted from conversation")
             return state
-        
+
         # Take the first (and typically only) episode
         episode = episodes[0]
-        
+
         logger.info(f"Episode summary: {episode.summary[:100]}...")
-        
+
         # Store episode in MongoDB
         episode_key = f"episode_{datetime.now().isoformat()}"
-        
+
         store.put(
             namespace=("customers", customer_id, "episodes"),
             key=episode_key,
@@ -400,11 +443,11 @@ def create_episode_node(state: AgentState, store: MongoDBStore) -> AgentState:
             },
             index=True  # Enable vector search on this episode
         )
-        
+
         logger.info(f"Episode stored successfully: {episode_key}")
-        
+
         return state
-        
+
     except Exception as e:
         logger.error(f"Error in create_episode_node: {e}")
         # Don't fail the flow on episode creation errors

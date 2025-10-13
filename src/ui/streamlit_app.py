@@ -57,21 +57,21 @@ def load_customer_memories(customer_id: str):
     try:
         store = db_manager.get_store()
         
-        # Get preferences
+        # Get preferences - namespace_prefix is positional, not keyword
         preferences = store.search(
-            namespace_prefix=("customers", customer_id, "preferences"),
+            ("customers", customer_id, "preferences"),
             limit=20
         )
         
         # Get episodes
         episodes = store.search(
-            namespace_prefix=("customers", customer_id, "episodes"),
+            ("customers", customer_id, "episodes"),
             limit=10
         )
         
         # Get insights
         insights = store.search(
-            namespace_prefix=("customers", customer_id, "insights"),
+            ("customers", customer_id, "insights"),
             limit=10
         )
         
@@ -83,7 +83,6 @@ def load_customer_memories(customer_id: str):
     except Exception as e:
         logger.error(f"Error loading memories: {e}")
         return {"preferences": [], "episodes": [], "insights": []}
-
 
 # Header
 st.title("🛍️ Store Associate Assistant")

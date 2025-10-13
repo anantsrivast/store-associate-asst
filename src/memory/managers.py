@@ -53,7 +53,7 @@ class MemoryManagers:
             
             # Create the memory manager with specific instructions
             cls._semantic_manager = create_memory_manager(
-                model=llm_model,
+                llm_model,
                 schemas=[CustomerPreference],
                 instructions="""
                 You are a memory extraction specialist for a retail store.
@@ -179,7 +179,7 @@ class MemoryManagers:
             llm_model = init_chat_model(config.llm.model)
             
             cls._consolidation_manager = create_memory_manager(
-                model=llm_model,
+                llm_model,
                 schemas=[ConsolidatedInsight],
                 instructions="""
                 You are a pattern recognition specialist analyzing customer behavior.

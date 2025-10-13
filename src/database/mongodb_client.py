@@ -191,25 +191,23 @@ class MongoDBClientManager:
             raise RuntimeError("Database not initialized")
         return self._db[collection_name]
 
-    def get_checkpointer(self) -> MongoDBSaver:
-        """
-        Get LangGraph checkpointer for short-term memory.
-
-        The checkpointer persists conversation state, enabling:
-        - Conversation history within a session
-        - Pause and resume conversations
-        - Human-in-the-loop workflows
-        - Time travel debugging
-
-        Returns:
-            MongoDBSaver instance configured with MongoDB
-        """
-        return MongoDBSaver.from_conn_string(
-            conn_string=config.mongodb.uri,
-            db_name=config.mongodb.db_name,
-            collection_name=config.mongodb.checkpoints_collection
+    def get_checkpointer(self):
+      from langgraph.checkpoint.mongodb import MongoDBSaver
+      from pymongo import MongoClient
+        
+        # Create a dedicated client for the checkpointer
+      client = MongoClient(
+            config.mongodb.uri,
+            maxPoolSize=50,
+            minPoolSize=10,
+            serverSelectionTimeoutMS=5000
         )
-
+        
+        # Create checkpointer with correct parameter name
+      return MongoDBSaver(
+            client=client,  # Use 'client' not 'conn'
+            db_name=config.mongodb.db_name
+        )
     def get_store(self) -> MongoDBStore:
         from langchain_openai import OpenAIEmbeddings
 
