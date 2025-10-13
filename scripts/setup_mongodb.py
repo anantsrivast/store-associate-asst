@@ -1,9 +1,4 @@
 
-# ============================================================================
-# FILE: scripts/setup_mongodb.py
-# DESCRIPTION: Setup MongoDB with proper indexes and configuration
-# ============================================================================
-
 #!/usr/bin/env python3
 
 import sys

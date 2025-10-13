@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/memory/consolidation.py
-# DESCRIPTION: Background memory consolidation logic
-# ============================================================================
 
 from typing import List
 from datetime import datetime, timedelta

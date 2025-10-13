@@ -1,9 +1,4 @@
 
-# ============================================================================
-# FILE: src/agent/nodes.py
-# DESCRIPTION: LangGraph node implementations
-# ============================================================================
-
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain.chat_models import init_chat_model

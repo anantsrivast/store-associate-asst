@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/agent/graph.py
-# DESCRIPTION: LangGraph workflow definition and compilation
-# ============================================================================
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.mongodb import MongoDBSaver

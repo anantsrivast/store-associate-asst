@@ -1,7 +1,3 @@
-# ============================================================================
-# ADDITIONAL FILE: tests/test_memory.py
-# DESCRIPTION: Basic memory tests
-# ============================================================================
 
 import pytest
 from src.memory.models import CustomerPreference, ConversationEpisode

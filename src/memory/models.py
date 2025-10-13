@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/memory/models.py
-# DESCRIPTION: Pydantic models defining memory structures
-# ============================================================================
 
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any

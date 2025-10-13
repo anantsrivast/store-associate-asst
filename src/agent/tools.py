@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/agent/tools.py
-# DESCRIPTION: Tools available to the agent
-# ============================================================================
 
 from langchain_core.tools import tool
 from langchain_core.messages import BaseMessage

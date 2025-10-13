@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/ui/streamlit_app.py
-# DESCRIPTION: Streamlit UI for the Store Assistant demo
-# ============================================================================
 
 import streamlit as st
 from datetime import datetime

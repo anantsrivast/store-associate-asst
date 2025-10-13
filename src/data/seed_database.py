@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/data/seed_database.py
-# DESCRIPTION: Seed MongoDB with synthetic data
-# ============================================================================
 
 import asyncio
 from src.database.mongodb_client import db_manager

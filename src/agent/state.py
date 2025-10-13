@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/agent/state.py
-# DESCRIPTION: LangGraph state definitions
-# ============================================================================
 
 from typing import TypedDict, List, Optional, Dict
 from langchain_core.messages import BaseMessage

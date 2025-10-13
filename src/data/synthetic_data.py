@@ -1,7 +1,3 @@
-============================================================================
-# FILE: src/data/synthetic_data.py
-# DESCRIPTION: Generate realistic synthetic data for demonstrations
-# ============================================================================
 
 from faker import Faker
 from typing import List, Dict, Any
@@ -16,14 +12,14 @@ fake = Faker()
 class SyntheticDataGenerator:
     """
     Generates realistic synthetic data for the store assistant demo.
-    
+
     This includes:
     - Customer profiles with varied demographics
     - Product catalog across multiple categories
     - Purchase history with realistic patterns
     - Initial memories for select customers
     """
-    
+
     # Product categories and typical items
     CATEGORIES = {
         "athletic_shoes": {
@@ -52,18 +48,18 @@ class SyntheticDataGenerator:
             "variants": ["colors"]
         }
     }
-    
+
     SIZES = {
         "shoes": ["6", "6.5", "7", "7.5", "8", "8.5", "9", "9.5", "10", "10.5", "11", "11.5", "12"],
         "clothing": ["XS", "S", "M", "L", "XL", "XXL"]
     }
-    
+
     COLORS = ["Black", "White", "Navy", "Gray", "Red", "Blue", "Green"]
-    
+
     def __init__(self, num_customers: int = 50, num_products: int = 200):
         """
         Initialize the generator.
-        
+
         Args:
             num_customers: Number of customer profiles to generate
             num_products: Number of products to generate
@@ -72,22 +68,22 @@ class SyntheticDataGenerator:
         self.num_products = num_products
         Faker.seed(42)  # For reproducibility
         random.seed(42)
-    
+
     def generate_customers(self) -> List[Dict[str, Any]]:
         """
         Generate customer profiles.
-        
+
         Returns:
             List of customer dictionaries
         """
         logger.info(f"Generating {self.num_customers} customer profiles")
-        
+
         customers = []
         loyalty_tiers = ["bronze", "silver", "gold", "platinum"]
-        
+
         for i in range(self.num_customers):
             customer_id = f"customer_{i+1:04d}"
-            
+
             # Generate realistic profile
             customer = {
                 "customer_id": customer_id,
@@ -104,21 +100,21 @@ class SyntheticDataGenerator:
                 ),
                 "updated_at": datetime.now()
             }
-            
+
             customers.append(customer)
-        
+
         logger.info(f"Generated {len(customers)} customers")
         return customers
-    
+
     def generate_products(self) -> List[Dict[str, Any]]:
         """
         Generate product catalog.
-        
+
         Returns:
             List of product dictionaries
         """
         logger.info(f"Generating {self.num_products} products")
-        
+
         products = []
         product_names = {
             "athletic_shoes": [
@@ -142,30 +138,32 @@ class SyntheticDataGenerator:
                 "Gym Bag", "Cap"
             ]
         }
-        
+
         sku_counter = 1
-        
+
         for category, config in self.CATEGORIES.items():
             names = product_names[category]
             brands = config["brands"]
             price_min, price_max = config["price_range"]
-            
+
             # Generate multiple products per category
             products_per_category = self.num_products // len(self.CATEGORIES)
-            
+
             for _ in range(products_per_category):
                 name = random.choice(names)
                 brand = random.choice(brands)
-                
+
                 # Generate variants
                 variants = []
                 if "sizes" in config["variants"]:
                     size_type = "shoes" if "shoes" in category else "clothing"
-                    variants.extend([{"type": "size", "value": s} for s in self.SIZES[size_type]])
-                
+                    variants.extend([{"type": "size", "value": s}
+                                    for s in self.SIZES[size_type]])
+
                 if "colors" in config["variants"]:
-                    variants.extend([{"type": "color", "value": c} for c in random.sample(self.COLORS, 3)])
-                
+                    variants.extend([{"type": "color", "value": c}
+                                    for c in random.sample(self.COLORS, 3)])
+
                 product = {
                     "sku": f"SKU{sku_counter:06d}",
                     "name": f"{brand} {name}",
@@ -177,87 +175,89 @@ class SyntheticDataGenerator:
                     "inventory": random.randint(0, 100),
                     "created_at": datetime.now()
                 }
-                
+
                 products.append(product)
                 sku_counter += 1
-        
+
         logger.info(f"Generated {len(products)} products")
         return products
-    
+
     def _generate_product_description(self, category: str, brand: str, name: str) -> str:
         """Generate realistic product description"""
-        descriptions = {
-            "athletic_shoes": f"High-performance running shoe designed for comfort and speed. Features responsive cushioning and breathable mesh upper.",
-            "casual_shoes": f"Classic everyday sneaker with timeless style. Comfortable fit perfect for all-day wear.",
-            "athletic_wear": f"Performance {category.split('_')[1]} designed for intense workouts. Moisture-wicking fabric keeps you dry.",
-            "casual_wear": f"Comfortable {category.split('_')[1]} perfect for everyday wear. Soft fabric with modern fit.",
-            "accessories": f"Essential training accessory for athletes. Durable construction built to last."
-        }
-        
-        return descriptions.get(category, "Quality product from {brand}.")
-    
+        if "shoes" in category:
+            return f"High-quality {category.replace('_', ' ')} from {brand}. Designed for comfort and durability."
+        elif "wear" in category:
+            return f"Premium {category.replace('_', ' ')} from {brand}. Perfect for your active lifestyle."
+        elif "accessories" in category:
+            return f"Essential {name} from {brand}. Built to last through your toughest workouts."
+        else:
+            return f"Quality product from {brand}. {name} designed for performance."
+
     def generate_purchases(self, customers: List[Dict], products: List[Dict]) -> List[Dict[str, Any]]:
         """
         Generate purchase history for customers.
-        
+
         Creates realistic purchase patterns with:
         - Seasonal variations
         - Brand loyalty
         - Category preferences
-        
+
         Args:
             customers: List of customer profiles
             products: List of products
-            
+
         Returns:
             List of purchase dictionaries
         """
         logger.info("Generating purchase history")
-        
+
         purchases = []
         order_counter = 1
-        
+
         # Generate 3-10 purchases per customer
-        for customer in customers[:30]:  # Only for first 30 customers to keep it manageable
+        # Only for first 30 customers to keep it manageable
+        for customer in customers[:30]:
             num_purchases = random.randint(3, 10)
-            
+
             # Pick favorite brands for this customer
             all_brands = list(set(p["brand"] for p in products))
-            favorite_brands = random.sample(all_brands, min(2, len(all_brands)))
-            
+            favorite_brands = random.sample(
+                all_brands, min(2, len(all_brands)))
+
             for _ in range(num_purchases):
                 # Generate purchase date (last 12 months)
                 purchase_date = fake.date_time_between(
                     start_date="-1y",
                     end_date="now"
                 )
-                
+
                 # Select 1-3 items
                 num_items = random.randint(1, 3)
-                
+
                 # Prefer favorite brands (70% of time)
                 if random.random() < 0.7:
-                    available_products = [p for p in products if p["brand"] in favorite_brands]
+                    available_products = [
+                        p for p in products if p["brand"] in favorite_brands]
                 else:
                     available_products = products
-                
+
                 items = []
                 total_amount = 0
-                
+
                 for _ in range(num_items):
                     product = random.choice(available_products)
                     quantity = 1
                     price = product["price"]
-                    
+
                     items.append({
                         "sku": product["sku"],
                         "name": product["name"],
                         "quantity": quantity,
                         "price": price
                     })
-                    
+
                     total_amount += price * quantity
-                
+
                 purchase = {
                     "order_id": f"ORDER{order_counter:08d}",
                     "customer_id": customer["customer_id"],
@@ -267,34 +267,34 @@ class SyntheticDataGenerator:
                     "store_location": random.choice(["Main St", "Downtown", "Mall", "Outlet"]),
                     "associate_id": f"ASSOC{random.randint(1, 10):03d}"
                 }
-                
+
                 purchases.append(purchase)
                 order_counter += 1
-        
+
         logger.info(f"Generated {len(purchases)} purchases")
         return purchases
-    
+
     def generate_initial_memories(self, customers: List[Dict]) -> Dict[str, List[Dict]]:
         """
         Generate initial memories for demo customers.
-        
+
         Creates a few pre-populated memories to make demos more interesting.
-        
+
         Args:
             customers: List of customer profiles
-            
+
         Returns:
             Dictionary mapping customer_id to list of memories
         """
         logger.info("Generating initial memories for demo customers")
-        
+
         memories = {}
-        
+
         # Create memories for first 5 customers
         for customer in customers[:5]:
             customer_id = customer["customer_id"]
             customer_memories = []
-            
+
             # Add some preferences
             preferences = [
                 {
@@ -324,9 +324,9 @@ class SyntheticDataGenerator:
                     }
                 }
             ]
-            
+
             customer_memories.extend(preferences)
-            
+
             # Add an episode
             episode = {
                 "namespace": ("customers", customer_id, "episodes"),
@@ -344,10 +344,11 @@ class SyntheticDataGenerator:
                     "created_at": datetime.now().isoformat()
                 }
             }
-            
+
             customer_memories.append(episode)
-            
+
             memories[customer_id] = customer_memories
-        
-        logger.info(f"Generated initial memories for {len(memories)} customers")
+
+        logger.info(
+            f"Generated initial memories for {len(memories)} customers")
         return memories

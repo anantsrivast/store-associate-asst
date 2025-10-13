@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/database/schemas.py
-# DESCRIPTION: MongoDB collection schemas and index definitions
-# ============================================================================
 
 from typing import Dict, Any, List
 from pymongo import IndexModel, ASCENDING, DESCENDING

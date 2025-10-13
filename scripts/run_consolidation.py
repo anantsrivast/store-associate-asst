@@ -1,8 +1,3 @@
-# ============================================================================
-# FILE: scripts/run_consolidation.py
-# DESCRIPTION: Manually trigger memory consolidation
-# ============================================================================
-
 #!/usr/bin/env python3
 
 import asyncio

@@ -1,8 +1,3 @@
-============================================================================
-# FILE: src/config.py
-# DESCRIPTION: Central configuration management for the entire application
-# ============================================================================
-
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings

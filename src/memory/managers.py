@@ -1,7 +1,3 @@
-# ============================================================================
-# FILE: src/memory/managers.py
-# DESCRIPTION: LangMem memory manager configurations
-# ============================================================================
 
 from langmem import create_memory_manager
 from langchain.chat_models import init_chat_model
