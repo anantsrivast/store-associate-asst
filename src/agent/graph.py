@@ -127,52 +127,47 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
 CUSTOMER INFORMATION:
 You are currently helping customer_id: {customer_id}
 
-TOOL SELECTION GUIDELINES - VERY IMPORTANT:
+MULTI-STEP WORKFLOW:
+When a customer asks for recommendations, follow this process:
+1. FIRST: Use search_memory to understand their preferences
+2. SECOND: Use search_products based on what you learned
+3. THIRD: Present the products with personalized context
 
-1. **For factual customer data** (shoe size, name, email, preferred brands, loyalty tier):
-   → ALWAYS use get_customer_profile('{customer_id}')
-   → This retrieves structured data stored in the customer's profile
-   → Example: "What's my shoe size?" → Use get_customer_profile
+Example:
+Customer: "Show me products based on my interests"
+Step 1: search_memory("interests preferences activities") 
+Step 2: search_products("running shoes hiking gear") based on memory results
+Step 3: Present: "Based on your love of running and hiking, here are some great options..."
 
-2. **To update customer data** when they share new facts:
-   → Use update_customer_profile('{customer_id}', updates)
-   → Example: User says "I wear size 8" → update_customer_profile('{customer_id}', {{"shoe_size": 8}})
-   → Then ALSO save context to memory with manage_memory()
+CRITICAL INSTRUCTION - SHOWING SEARCH RESULTS:
+When you use search_products and it returns results, YOU MUST immediately show those products to the customer in your response. Do NOT stop after just searching memory - continue to search products and show results.
 
-3. **For past purchases**:
-   → Use get_purchase_history('{customer_id}')
-   → Shows what they've bought before
+TOOL SELECTION GUIDELINES:
 
-4. **For product searches**:
-   → Use search_products(query, category)
-   → Example: "Show me running shoes" → search_products("running shoes", "shoes")
+1. **For STRUCTURED FACTS** (shoe size, email, name):
+   → Use get_customer_profile('{customer_id}')
 
-5. **For conversational context and preferences** (not structured facts):
+2. **For CONVERSATIONAL CONTEXT and PREFERENCES**:
    → Use search_memory(query)
-   → Example: "What did I say about marathon training?" → search_memory("marathon training")
+   → Then USE the results to inform product searches
 
-6. **To save new conversational insights**:
-   → Use manage_memory(content)
-   → Save contextual information, preferences, conversation summaries
-   → Example: "Customer mentioned training for a marathon"
+3. **For PRODUCT SEARCHES**:
+   → Use search_products(query)
+   → Can call multiple times with different queries
+   → ALWAYS present the results immediately
 
-WORKFLOW EXAMPLE:
-- User: "I wear size 8 Nike shoes"
-- Step 1: update_customer_profile('{customer_id}', {{"shoe_size": 8, "preferred_brands": ["Nike"]}})
-- Step 2: manage_memory("Customer prefers Nike brand and wears size 8")
-- Response: "Got it! I've saved that you wear size 8 and prefer Nike. I'll remember this for next time!"
+4. **When customer asks for recommendations "based on my interests"**:
+   → Step 1: search_memory("interests preferences activities")
+   → Step 2: search_products(relevant_query) using what you learned
+   → Step 3: Present products with personalized context
 
-- User: "What's my shoe size?"
-- Step 1: get_customer_profile('{customer_id}')
-- Step 2: Read shoe_size from the returned profile
-- Response: "Your shoe size is 8!"
+5. **To save information**:
+   → Structured facts → update_customer_profile
+   → Conversational context → manage_memory
 
-GUIDELINES:
-- Be friendly, helpful, and professional
-- Reference past information naturally when relevant
-- Make personalized recommendations based on preferences
-- Ask clarifying questions when needed
-- Always use the appropriate tool for the type of information requested
+Remember: Complete the full workflow before responding. If you search memory, use those results to search products too!
+
+Your goal is to be proactive, helpful, and show actual products, not just acknowledge the request.
 """
         
         # Initialize LLM with proper API key handling

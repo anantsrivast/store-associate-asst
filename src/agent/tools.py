@@ -7,65 +7,94 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+
 @tool
 def search_products(
     query: str, 
     category: Optional[str] = None, 
     max_results: int = 10
-) -> List[Dict[str, Any]]:
+) -> str:
     """
-    Search for products in the store catalog.
+    Search for products in the store catalog using Atlas Full-Text Search.
     
     Use this tool when the customer asks about products or you need
     to find product information.
     
     Args:
-        query: Search query (product name, keywords, description)
-        category: Optional category filter (e.g., "shoes", "athletic_wear")
+        query: Search query (product name, keywords, description, brand)
+        category: Optional category filter (ignored for now - searches all)
         max_results: Maximum number of results to return
         
     Returns:
-        List of product dictionaries with details
+        Formatted string with product details
     """
     try:
         collection = db_manager.get_collection(config.mongodb.products_collection)
         
-        # Build search query
-        search_filter = {}
-        if category:
-            search_filter["category"] = category
+        # Simple Atlas Search - search everything!
+        pipeline = [
+            {
+                "$search": {
+                    "index": "default",
+                    "text": {
+                        "query": query,
+                        "path": {"wildcard": "*"},  # Search ALL text fields
+                        "fuzzy": {
+                            "maxEdits": 1
+                        }
+                    }
+                }
+            },
+            {
+                "$addFields": {
+                    "search_score": {"$meta": "searchScore"}
+                }
+            },
+            {
+                "$limit": max_results
+            }
+        ]
         
-        # Text search on name and description
-        if query:
-            search_filter["$text"] = {"$search": query}
+        logger.info(f"Atlas Search for '{query}' (category hint: {category})")
         
         # Execute search
-        products = list(collection.find(
-            search_filter,
-            limit=max_results
-        ).sort("price", 1))
+        products = list(collection.aggregate(pipeline))
         
-        # Format results
-        results = []
-        for product in products:
-            results.append({
-                "sku": product.get("sku"),
-                "name": product.get("name"),
-                "brand": product.get("brand"),
-                "category": product.get("category"),
-                "price": product.get("price"),
-                "description": product.get("description", "")[:200],
-                "variants": product.get("variants", [])
-            })
+        if not products:
+            return f"No products found matching '{query}'"
         
-        logger.info(f"Product search for '{query}' returned {len(results)} results")
-        return results
+        # Format results as a readable string
+        result_text = f"Found {len(products)} products:\n\n"
+        
+        for i, product in enumerate(products, 1):
+            result_text += f"{i}. **{product.get('name', 'Unknown')}**\n"
+            result_text += f"   • Brand: {product.get('brand', 'N/A')}\n"
+            result_text += f"   • Price: ${product.get('price', 'N/A'):.2f}\n"
+            result_text += f"   • Category: {product.get('category', 'N/A')}\n"
+            result_text += f"   • SKU: {product.get('sku', 'N/A')}\n"
+            result_text += f"   • Relevance: {product.get('search_score', 0):.2f}\n"
+            
+            # Add description if available
+            description = product.get('description', '')
+            if description:
+                desc_preview = description[:150] + "..." if len(description) > 150 else description
+                result_text += f"   • Description: {desc_preview}\n"
+            
+            # Add variants if available
+            variants = product.get('variants', [])
+            if variants:
+                sizes = [v.get('size') for v in variants if v.get('size')]
+                if sizes:
+                    result_text += f"   • Available sizes: {', '.join(map(str, sizes))}\n"
+            
+            result_text += "\n"
+        
+        logger.info(f"Atlas Search returned {len(products)} results")
+        return result_text
         
     except Exception as e:
-        logger.error(f"Error searching products: {e}")
-        return []
-
-
+        logger.error(f"Error searching products: {e}", exc_info=True)
+        return f"Sorry, I encountered an error searching for products: {str(e)}"
 @tool
 def get_customer_profile(customer_id: str) -> Dict[str, Any]:
     """
