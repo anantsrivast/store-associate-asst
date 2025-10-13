@@ -1,0 +1,749 @@
+# Store Associate AI Assistant with LangMem & MongoDB
+
+## 📋 Table of Contents
+
+1. [Project Overview](#project-overview)
+2. [Features](#features)
+3. [Architecture](#architecture)
+4. [Memory System Design](#memory-system-design)
+5. [Project Structure](#project-structure)
+6. [Setup Instructions](#setup-instructions)
+7. [Component Details](#component-details)
+8. [Usage Examples](#usage-examples)
+9. [Memory Flow Diagrams](#memory-flow-diagrams)
+
+---
+
+## 🎯 Project Overview
+
+This project demonstrates a production-ready AI Store Associate Assistant that uses **LangMem**, **LangGraph**, and **MongoDB** to showcase different types of memory:
+
+- **Short-term Memory**: Active conversation state
+- **Long-term Memory**: Customer profiles and preferences
+- **Episodic Memory**: Summaries of past shopping experiences
+- **Semantic Memory**: Extracted facts and patterns
+- **Consolidated Insights**: Learned patterns from multiple interactions
+
+The assistant remembers customer preferences, past purchases, and interactions across multiple sessions, providing personalized shopping experiences.
+
+---
+
+## ✨ Features
+
+### Core Capabilities
+
+1. **Multi-Session Memory**
+   - Remembers customers across different shopping visits
+   - Maintains conversation history per customer
+   - Stores preferences that persist indefinitely
+
+2. **Intelligent Memory Types**
+   - **Short-term**: Current conversation context (via LangGraph checkpointer)
+   - **Episodic**: Past interaction summaries with semantic search
+   - **Semantic**: Customer facts, preferences, sizes, brands
+   - **Consolidated**: Patterns extracted from multiple visits
+
+3. **Memory Summarization**
+   - Rolling conversation summarization to manage context limits
+   - Automatic episode creation when conversations end
+   - Background consolidation to extract patterns
+   - TTL-based memory expiration for old data
+
+4. **Smart Retrieval**
+   - Vector search for semantic similarity
+   - Namespace-based memory organization
+   - Relevance-ranked memory retrieval
+   - Privacy-preserving user isolation
+
+5. **Production Features**
+   - Synthetic data generation for realistic demos
+   - Complete MongoDB schemas
+   - Error handling and logging
+   - Async operations for performance
+   - Configurable summarization policies
+
+---
+
+## 🏗️ Architecture
+
+### High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Store Associate UI                      │
+│                    (Streamlit App)                       │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                    LangGraph Agent                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │   Summarize  │→│    Agent     │→│Extract Memory│  │
+│  │ Conversation │  │    Node      │  │    Node      │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│         ↓                  ↓                  ↓          │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │         Create Episode (on session end)          │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                      LangMem Layer                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │   Semantic   │  │   Episodic   │  │Consolidation │  │
+│  │   Manager    │  │   Manager    │  │   Manager    │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                  LangGraph Storage                       │
+│  ┌──────────────┐              ┌──────────────────────┐ │
+│  │ MongoDBSaver │              │   MongoDBStore       │ │
+│  │ (Checkpoints)│              │  (Long-term Memory)  │ │
+│  └──────────────┘              └──────────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                      MongoDB Atlas                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ Checkpoints  │  │Customer      │  │  Products    │  │
+│  │ Collection   │  │Memories      │  │  Collection  │  │
+│  └──────────────┘  │Collection    │  └──────────────┘  │
+│                    └──────────────┘                      │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Memory Flow Architecture
+
+```
+User Query
+    ↓
+┌─────────────────┐
+│ Check if need   │
+│ to summarize    │ → If > 2000 tokens: Create rolling summary
+└─────────────────┘
+    ↓
+┌─────────────────┐
+│ Retrieve        │ → Search episodic memories (vector search)
+│ Relevant        │ → Get semantic facts (namespace query)
+│ Memories        │ → Get consolidated insights
+└─────────────────┘
+    ↓
+┌─────────────────┐
+│ Agent Processes │ → Uses retrieved memories as context
+│ with Memory     │ → Calls tools if needed
+└─────────────────┘
+    ↓
+┌─────────────────┐
+│ Extract New     │ → Real-time semantic fact extraction
+│ Memories        │ → Store preferences immediately
+│ (Hot Path)      │
+└─────────────────┘
+    ↓
+┌─────────────────┐
+│ Session Ends?   │
+└─────────────────┘
+    ↓ (Yes)
+┌─────────────────┐
+│ Create Episode  │ → Summarize full conversation
+│ Summary         │ → Store with embeddings
+└─────────────────┘
+    ↓ (Background)
+┌─────────────────┐
+│ Consolidation   │ → Run nightly/weekly
+│ (Periodic)      │ → Extract patterns from episodes
+└─────────────────┘
+```
+
+---
+
+## 🧠 Memory System Design
+
+### Memory Type Breakdown
+
+| Memory Type | Storage Location | Lifespan | Retrieval Method | Purpose |
+|-------------|-----------------|----------|------------------|---------|
+| **Short-term (Working)** | `checkpoints` collection | Session duration | Thread ID | Current conversation |
+| **Episodic** | `customer_memories` NS: `episodes` | 90 days (TTL) | Vector search | Past interactions |
+| **Semantic** | `customer_memories` NS: `preferences` | Indefinite | Key-value | Facts & preferences |
+| **Consolidated** | `customer_memories` NS: `insights` | Indefinite | Key-value + search | Learned patterns |
+| **Conversation Summary** | In-memory state | Session duration | N/A | Context compression |
+
+### Namespace Organization
+
+```
+MongoDBStore Namespaces:
+
+("customers", "{customer_id}", "preferences")
+    ├── "favorite_brands": {...}
+    ├── "sizes": {...}
+    ├── "price_range": {...}
+    └── "communication_style": {...}
+
+("customers", "{customer_id}", "episodes")
+    ├── "episode_2025-10-11T10:30:00": {summary, embedding, ...}
+    ├── "episode_2025-10-08T14:15:00": {summary, embedding, ...}
+    └── "episode_2025-10-01T09:00:00": {summary, embedding, ...}
+
+("customers", "{customer_id}", "insights")
+    ├── "pattern_quarterly_runner": {pattern, confidence, ...}
+    ├── "pattern_size_8_shoes": {pattern, confidence, ...}
+    └── "pattern_nike_loyalty": {pattern, confidence, ...}
+```
+
+---
+
+## 📁 Project Structure
+
+```
+store-associate-assistant/
+├── .devcontainer/
+│   └── devcontainer.json          # Codespaces configuration
+├── src/
+│   ├── __init__.py
+│   ├── config.py                  # Configuration & environment variables
+│   ├── database/
+│   │   ├── __init__.py
+│   │   ├── mongodb_client.py      # MongoDB connection management
+│   │   └── schemas.py             # MongoDB collection schemas
+│   ├── memory/
+│   │   ├── __init__.py
+│   │   ├── managers.py            # LangMem memory managers
+│   │   ├── models.py              # Pydantic models for memories
+│   │   └── consolidation.py      # Background consolidation logic
+│   ├── agent/
+│   │   ├── __init__.py
+│   │   ├── graph.py               # LangGraph workflow definition
+│   │   ├── nodes.py               # Graph node implementations
+│   │   ├── state.py               # State definitions
+│   │   └── tools.py               # Agent tools
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── synthetic_data.py      # Synthetic data generation
+│   │   └── seed_database.py       # Database seeding script
+│   └── ui/
+│       ├── __init__.py
+│       └── streamlit_app.py       # Streamlit UI
+├── notebooks/
+│   ├── 01_setup_and_explore.ipynb
+│   ├── 02_memory_demonstration.ipynb
+│   └── 03_consolidation_demo.ipynb
+├── tests/
+│   ├── __init__.py
+│   ├── test_memory.py
+│   └── test_agent.py
+├── scripts/
+│   ├── setup_mongodb.py           # MongoDB setup script
+│   ├── run_consolidation.py       # Manual consolidation trigger
+│   └── clear_data.py              # Reset demo data
+├── docs/
+│   ├── ARCHITECTURE.md            # This file
+│   ├── API.md                     # API documentation
+│   └── DEPLOYMENT.md              # Deployment guide
+├── requirements.txt               # Python dependencies
+├── .env.example                   # Environment variables template
+├── .gitignore
+└── README.md                      # Quick start guide
+```
+
+---
+
+## 🔧 Component Details
+
+### 1. **config.py**
+Central configuration management for the entire application.
+
+**Responsibilities:**
+- Load environment variables (MongoDB URI, API keys)
+- Define memory policies (TTL, summarization triggers)
+- Configure embedding models
+- Set namespace patterns
+
+**Key Classes:**
+- `Config`: Main configuration singleton
+- `MemoryConfig`: Memory-specific settings
+- `SummarizationConfig`: Summarization policies
+
+---
+
+### 2. **database/mongodb_client.py**
+MongoDB connection and client management.
+
+**Responsibilities:**
+- Establish MongoDB connections
+- Create and manage collections
+- Set up indexes (vector search, TTL)
+- Connection pooling and error handling
+
+**Key Functions:**
+- `get_mongodb_client()`: Returns configured MongoDB client
+- `setup_collections()`: Creates collections with proper indexes
+- `get_store()`: Returns MongoDBStore instance
+- `get_checkpointer()`: Returns MongoDBSaver instance
+
+---
+
+### 3. **database/schemas.py**
+MongoDB collection schemas and indexes.
+
+**Collections:**
+- `checkpoints`: Conversation state (LangGraph checkpointer)
+- `checkpoint_writes`: Checkpoint metadata
+- `customer_memories`: Long-term memory store
+- `customers`: Customer profiles
+- `products`: Product catalog
+- `purchases`: Transaction history
+
+**Indexes:**
+- Vector search index on `customer_memories` for semantic search
+- TTL index on `customer_memories.updated_at`
+- Compound indexes for efficient queries
+
+---
+
+### 4. **memory/models.py**
+Pydantic models defining memory structures.
+
+**Models:**
+- `CustomerPreference`: Individual preference/fact
+- `ConversationEpisode`: Episode summary structure
+- `ConsolidatedInsight`: Pattern extracted from multiple episodes
+- `CustomerProfile`: Complete customer profile
+
+**Purpose:** Type safety, validation, and clear data contracts
+
+---
+
+### 5. **memory/managers.py**
+LangMem memory manager configurations.
+
+**Managers:**
+- `semantic_memory_manager`: Extracts facts during conversations
+- `episode_memory_manager`: Summarizes conversations into episodes
+- `consolidation_manager`: Extracts patterns from multiple episodes
+
+**Key Functions:**
+- `get_semantic_manager()`: Returns configured semantic manager
+- `get_episode_manager()`: Returns episode manager
+- `get_consolidation_manager()`: Returns consolidation manager
+
+---
+
+### 6. **memory/consolidation.py**
+Background job for memory consolidation.
+
+**Responsibilities:**
+- Fetch recent episodes for a customer
+- Use consolidation manager to extract patterns
+- Store consolidated insights
+- Clean up old episodes (optional)
+
+**Scheduling:** Can be run as cron job or scheduled task
+
+---
+
+### 7. **agent/state.py**
+LangGraph state definitions.
+
+**State Classes:**
+- `AgentState`: Main agent state with messages, customer info
+- `RunningSummary`: Conversation summary state
+
+**State Fields:**
+- `messages`: List of conversation messages
+- `customer_id`: Current customer identifier
+- `session_active`: Whether session is ongoing
+- `context`: Running summaries for context compression
+
+---
+
+### 8. **agent/nodes.py**
+LangGraph node implementations.
+
+**Nodes:**
+- `check_summarization_node()`: Checks if conversation needs compression
+- `summarize_conversation_node()`: Creates rolling summaries
+- `agent_node()`: Main agent that processes queries
+- `extract_semantic_memories_node()`: Real-time fact extraction
+- `create_episode_node()`: Creates episode when session ends
+
+**Each node:**
+- Takes state as input
+- Performs specific operation
+- Returns updated state
+
+---
+
+### 9. **agent/graph.py**
+LangGraph workflow definition and compilation.
+
+**Responsibilities:**
+- Define the complete agent workflow
+- Connect nodes with edges
+- Set up conditional routing
+- Compile graph with checkpointer and store
+
+**Graph Flow:**
+```
+Entry → Check Summarization → Agent → Extract Memories → [Conditional]
+                                                              ↓
+                                                    Create Episode (if session ends)
+                                                              ↓
+                                                            End
+```
+
+---
+
+### 10. **agent/tools.py**
+Tools available to the agent.
+
+**Tools:**
+- `search_products`: Search product catalog
+- `get_customer_profile`: Retrieve customer info
+- `search_memories`: Search past interactions (LangMem)
+- `manage_memories`: Store new memories (LangMem)
+
+**Integration:** These tools are bound to the agent and callable during execution
+
+---
+
+### 11. **data/synthetic_data.py**
+Generates realistic synthetic data for demos.
+
+**Generates:**
+- 50-100 customer profiles with realistic attributes
+- 200-500 products across categories
+- Purchase history spanning 6-12 months
+- Initial memories for select customers
+
+**Realism:**
+- Names, emails, phone numbers (using Faker)
+- Realistic product descriptions
+- Seasonal purchase patterns
+- Varied customer preferences
+
+---
+
+### 12. **data/seed_database.py**
+Seeds the MongoDB database with synthetic data.
+
+**Process:**
+1. Connect to MongoDB
+2. Clear existing data (optional)
+3. Generate synthetic data
+4. Insert into collections
+5. Create initial memories
+6. Verify data integrity
+
+---
+
+### 13. **ui/streamlit_app.py**
+Interactive Streamlit UI for demonstrations.
+
+**Features:**
+- Customer selection dropdown
+- Chat interface
+- Memory visualization panel
+- Session management
+- Real-time memory updates
+
+**Panels:**
+- Chat: Main conversation interface
+- Memories: View current memories for customer
+- Episodes: Browse past interactions
+- Insights: Show consolidated patterns
+
+---
+
+## 🚀 Setup Instructions
+
+### Prerequisites
+
+- GitHub account with Codespaces access
+- OpenAI API key or Anthropic API key
+- MongoDB Atlas account (free tier works)
+
+### Quick Start
+
+1. **Open in GitHub Codespaces**
+   ```bash
+   # Click "Code" → "Create codespace on main"
+   ```
+
+2. **Configure Environment**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys and MongoDB URI
+   ```
+
+3. **Install Dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Setup MongoDB**
+   ```bash
+   python scripts/setup_mongodb.py
+   ```
+
+5. **Seed Database**
+   ```bash
+   python -m src.data.seed_database
+   ```
+
+6. **Run Application**
+   ```bash
+   streamlit run src/ui/streamlit_app.py
+   ```
+
+### MongoDB Atlas Setup
+
+1. Create free cluster at mongodb.com/cloud/atlas
+2. Create database user
+3. Whitelist IP (or use 0.0.0.0/0 for testing)
+4. Get connection string
+5. Enable Vector Search (in Atlas UI)
+
+---
+
+## 📚 Usage Examples
+
+### Example 1: First-Time Customer
+
+**Session 1:**
+```
+User: Hi, I'm Sarah. I'm training for my first marathon and need running shoes.
+Assistant: Welcome Sarah! I'd love to help you find the perfect running shoes 
+for your marathon training. What's your shoe size?
+
+[Memories Stored - Semantic]
+- Customer name: Sarah
+- Activity: Marathon training (first time)
+- Need: Running shoes
+```
+
+### Example 2: Returning Customer
+
+**Session 2 (2 weeks later):**
+```
+User: Hi, it's Sarah again
+Assistant: Hi Sarah! Great to see you again. How is your marathon training 
+going? Are the running shoes working out well?
+
+[Memories Retrieved - Episodic]
+- Episode from 2025-10-11: "Customer Sarah purchased Nike Pegasus 40, 
+  size 8, for marathon training"
+  
+[Memories Retrieved - Semantic]
+- Name: Sarah
+- Size: 8
+- Brand preference: Nike
+- Training for: Marathon
+```
+
+### Example 3: Pattern Recognition
+
+**After 5 visits:**
+```
+[Consolidated Insight Generated]
+Pattern: "Customer purchases running gear quarterly, always Nike brand, 
+size 8. Shows preference for technical/performance gear. Budget: $100-150 
+per item. Shops before major races."
+
+Confidence: 0.89
+Evidence: 5 episodes
+```
+
+---
+
+## 📊 Memory Flow Diagrams
+
+### Conversation Flow with Memory
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  User Input: "I need running shoes"                     │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Step 1: Check Token Count                              │
+│  Current: 450 tokens → No summarization needed          │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Step 2: Retrieve Relevant Memories                     │
+│  ┌────────────────────────────────────────────────┐    │
+│  │ Vector Search: "running shoes"                  │    │
+│  │ Results:                                        │    │
+│  │  - Episode: "Bought Nike Pegasus last month"   │    │
+│  │  - Insight: "Prefers performance footwear"     │    │
+│  └────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────┐    │
+│  │ Semantic Facts:                                 │    │
+│  │  - Size: 8                                     │    │
+│  │  - Brand: Nike                                 │    │
+│  │  - Budget: $100-150                            │    │
+│  └────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Step 3: Agent Processes with Context                   │
+│  Prompt includes:                                        │
+│  - Current query                                         │
+│  - Retrieved memories                                    │
+│  - Customer profile                                      │
+│  Agent generates personalized response                   │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Step 4: Extract New Memories (Real-time)               │
+│  Detected: "Customer looking for running shoes again"   │
+│  Store: frequency_of_running_shoe_purchases += 1        │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Step 5: Return Response to User                        │
+│  "Based on your previous purchase and marathon training, │
+│   I'd recommend checking out the new Nike Pegasus 41..." │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Episode Creation Flow
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Session Ends (session_active = False)                  │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Trigger: Create Episode Node                           │
+│  Input: Full conversation (all messages)                │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Episode Manager Analyzes Conversation                  │
+│  ┌────────────────────────────────────────────────┐    │
+│  │ LLM extracts:                                   │    │
+│  │  - Summary (2-3 sentences)                     │    │
+│  │  - Customer needs                              │    │
+│  │  - Products discussed                          │    │
+│  │  - Outcome                                     │    │
+│  │  - Key insights                                │    │
+│  │  - Sentiment                                   │    │
+│  └────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Generate Embedding                                      │
+│  Summary text → OpenAI Embeddings → 1536-dim vector    │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│  Store Episode in MongoDBStore                          │
+│  Namespace: ("customers", "sarah_123", "episodes")      │
+│  Key: "episode_2025-10-11T10:30:00"                     │
+│  Value: {summary, products, outcome, ...}               │
+│  Index: embedding vector                                │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🎓 Learning Path
+
+### For Beginners
+1. Start with `notebooks/01_setup_and_explore.ipynb`
+2. Run the Streamlit app and interact
+3. Read through `src/agent/nodes.py` comments
+4. Experiment with different customers
+
+### For Advanced Users
+1. Review `src/memory/consolidation.py`
+2. Modify memory extraction prompts
+3. Implement custom memory types
+4. Add new tools and capabilities
+
+---
+
+## 📝 Key Design Decisions
+
+1. **Why MongoDB?**
+   - Native vector search for semantic retrieval
+   - Flexible document model for varied memory types
+   - Single database for all data (operational + vector)
+
+2. **Why LangGraph?**
+   - Built-in checkpointing for short-term memory
+   - Native store integration for long-term memory
+   - Workflow orchestration for complex agent logic
+
+3. **Why LangMem?**
+   - Pre-built memory extraction patterns
+   - Separation of "what to remember" from storage
+   - Tools for agent-controlled memory
+
+4. **Namespace Design**
+   - User isolation for privacy
+   - Easy filtering and retrieval
+   - Hierarchical organization
+
+5. **Summarization Strategy**
+   - Multi-level for different purposes
+   - Background consolidation for scalability
+   - TTL for automatic cleanup
+
+---
+
+## 🔐 Security & Privacy
+
+- User memories isolated by namespace
+- No cross-user information leakage
+- MongoDB RBAC for access control
+- API keys in environment variables
+- Audit logging for memory access
+
+---
+
+## 🚦 Performance Considerations
+
+- Async operations where possible
+- Connection pooling for MongoDB
+- Embedding caching
+- Batch operations for consolidation
+- Indexed queries for fast retrieval
+
+---
+
+## 📈 Scalability
+
+- Horizontal scaling via MongoDB sharding
+- Distributed vector search
+- Background job distribution
+- Stateless agent design
+- Caching layer (optional)
+
+---
+
+## 🐛 Troubleshooting
+
+See `docs/TROUBLESHOOTING.md` for common issues and solutions.
+
+---
+
+## 📚 Additional Resources
+
+- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
+- [LangMem Documentation](https://langchain-ai.github.io/langmem/)
+- [MongoDB Atlas Vector Search](https://www.mongodb.com/docs/atlas/atlas-vector-search/)
+- [LangChain MongoDB Integration](https://python.langchain.com/docs/integrations/providers/mongodb_atlas)
+
+---
+
+## 🤝 Contributing
+
+Contributions welcome! See `CONTRIBUTING.md` for guidelines.
+
+---
+
+## 📄 License
+
+MIT License - see `LICENSE` file for details.

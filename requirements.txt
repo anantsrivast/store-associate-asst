@@ -1,0 +1,32 @@
+# Core Dependencies
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+langchain-mongodb>=0.2.0
+langgraph>=0.2.0
+langgraph-checkpoint-mongodb>=0.1.0
+langgraph-store-mongodb>=0.1.0
+langmem>=0.1.0
+
+# MongoDB
+pymongo>=4.6.0
+motor>=3.3.0
+
+# Data Generation & Processing
+faker>=20.0.0
+pandas>=2.0.0
+
+# UI
+streamlit>=1.28.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Development
+jupyter>=1.0.0
+ipykernel>=6.25.0
+pytest>=7.4.0
+black>=23.0.0
+ruff>=0.1.0
