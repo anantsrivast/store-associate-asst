@@ -210,37 +210,35 @@ class MongoDBClientManager:
         )
     def get_store(self) -> MongoDBStore:
         from langchain_openai import OpenAIEmbeddings
-
+        from langgraph.store.mongodb import VectorIndexConfig
+        
         collection = self.get_collection(config.mongodb.memories_collection)
-
-        # Only configure embeddings if we have an OpenAI key
+        
+        # Configure embeddings properly
         if config.llm.openai_api_key:
-            try:
-                embeddings = OpenAIEmbeddings(
-                    model="text-embedding-3-small"
-                )
-                # Create index config with proper structure
-                from langgraph.store.mongodb import VectorIndexConfig
-                index_config = VectorIndexConfig(
-                    dims=config.memory.embedding_dims,
-                    embed=embeddings
-                )
-            except Exception as e:
-                logger.warning(f"Could not configure embeddings: {e}")
-                index_config = None
+            embeddings = OpenAIEmbeddings(
+                model="text-embedding-3-small",
+                openai_api_key=config.llm.openai_api_key
+            )
+            
+            # Create proper index config
+            index_config = {
+                "dims": 1536,
+                "embed": embeddings
+            }
+            
+            return MongoDBStore(
+                collection=collection,
+                index=index_config  # Note: 'index' not 'index_config'
+            )
         else:
-            index_config = None
-
-        return MongoDBStore(
-            collection=collection,
-            index_config=index_config
-        )
-
-    def close(self):
-        """Close the MongoDB connection"""
-        if self._client:
-            self._client.close()
-            logger.info("MongoDB connection closed")
+            logger.warning("No OpenAI key - vector search disabled")
+            return MongoDBStore(collection=collection)
+        def close(self):
+            """Close the MongoDB connection"""
+            if self._client:
+                self._client.close()
+                logger.info("MongoDB connection closed")
 
 
 # Global instance

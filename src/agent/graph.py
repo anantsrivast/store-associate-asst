@@ -2,15 +2,11 @@
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from langgraph.store.mongodb import MongoDBStore
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import SystemMessage, AIMessage
 from src.agent.state import AgentState
-from src.agent.nodes import (
-    check_summarization_node,
-    summarize_conversation_node,
-    agent_node,
-    extract_semantic_memories_node,
-    create_episode_node
-)
 from src.database.mongodb_client import db_manager
+from src.config import config
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,18 +14,9 @@ logger = logging.getLogger(__name__)
 
 def create_agent_graph():
     """
-    Create and compile the complete agent graph.
+    Create and compile the complete agent graph with memory.
     
-    The graph flow:
-    1. Entry → Check Summarization
-    2. Check Summarization → (if needed) Summarize → Agent
-    3. Check Summarization → (if not needed) → Agent
-    4. Agent → Extract Memories
-    5. Extract Memories → (if session active) → END
-    6. Extract Memories → (if session ended) → Create Episode → END
-    
-    Returns:
-        Compiled graph ready for execution
+    Uses LangMem tools for agent-controlled memory management.
     """
     logger.info("Building agent graph")
     
@@ -41,82 +28,166 @@ def create_agent_graph():
     workflow = StateGraph(AgentState)
     
     # Add nodes
-    workflow.add_node("check_summarization", check_summarization_node)
-    workflow.add_node("summarize", summarize_conversation_node)
-    workflow.add_node("agent", lambda s: agent_node(s, store))
+    workflow.add_node("agent", lambda s: agent_node_with_memory(s, store))
     workflow.add_node("extract_memories", lambda s: extract_semantic_memories_node(s, store))
-    workflow.add_node("create_episode", lambda s: create_episode_node(s, store))
     
     # Define edges
-    # Entry point
-    workflow.set_entry_point("check_summarization")
-    
-    # Conditional edge: summarize if needed
-    workflow.add_conditional_edges(
-        "check_summarization",
-        lambda state: "summarize" if state.get("needs_summarization", False) else "agent",
-        {
-            "summarize": "summarize",
-            "agent": "agent"
-        }
-    )
-    
-    # After summarization, go to agent
-    workflow.add_edge("summarize", "agent")
-    
-    # After agent, extract memories
+    workflow.set_entry_point("agent")
     workflow.add_edge("agent", "extract_memories")
+    workflow.add_edge("extract_memories", END)
     
-    # Conditional edge: create episode if session ended
-    workflow.add_conditional_edges(
-        "extract_memories",
-        lambda state: "create_episode" if not state.get("session_active", True) else "end",
-        {
-            "create_episode": "create_episode",
-            "end": END
-        }
-    )
-    
-    # After episode creation, end
-    workflow.add_edge("create_episode", END)
-    
-    # Compile the graph with checkpointer and store
+    # Compile the graph
     graph = workflow.compile(
         checkpointer=checkpointer,
         store=store
     )
     
     logger.info("Agent graph compiled successfully")
-    
     return graph
 
+
+
+def agent_node_with_memory(state: AgentState, store: MongoDBStore) -> AgentState:
+    """
+    Main agent node with LangMem memory tools.
+    Properly handles tool call execution loop.
+    """
+    try:
+        from langmem import create_manage_memory_tool, create_search_memory_tool
+        from langchain_core.messages import ToolMessage
+        
+        customer_id = state["customer_id"]
+        messages = state["messages"]
+        
+        logger.info(f"Agent processing query for customer {customer_id}")
+        
+        # Create memory tools for this customer
+        memory_namespace = ("customers", customer_id, "memories")
+        
+        manage_memory = create_manage_memory_tool(
+            namespace=memory_namespace
+        )
+        
+        search_memory = create_search_memory_tool(
+            namespace=memory_namespace
+        )
+        
+        # System prompt
+        system_prompt = f"""You are a helpful store associate at a retail store.
+
+You have access to memory tools:
+- Use manage_memory to save customer preferences, sizes, and important details
+- Use search_memory to recall past information about the customer
+
+Guidelines:
+- Be friendly and professional
+- Save important customer details using manage_memory
+- Search past interactions using search_memory when relevant
+- Provide personalized recommendations
+
+Current customer: {customer_id}
+"""
+        
+        # Initialize LLM with tools
+        from langchain.chat_models import init_chat_model
+        model = init_chat_model(
+            config.llm.model,
+            temperature=config.llm.temperature,
+            max_tokens=config.llm.max_tokens
+        )
+        
+        # Bind tools
+        tools = [manage_memory, search_memory]
+        tools_by_name = {tool.name: tool for tool in tools}
+        model_with_tools = model.bind_tools(tools)
+        
+        # Prepare messages
+        from langchain_core.messages import SystemMessage
+        llm_messages = [SystemMessage(content=system_prompt)] + messages
+        
+        # Tool execution loop
+        max_iterations = 5
+        for iteration in range(max_iterations):
+            # Get response from LLM
+            response = model_with_tools.invoke(llm_messages)
+            llm_messages.append(response)
+            
+            # Check if there are tool calls
+            if not response.tool_calls:
+                # No more tool calls, we're done
+                break
+            
+            # Execute each tool call
+            for tool_call in response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_id = tool_call["id"]
+                
+                logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
+                
+                try:
+                    # Get the tool and execute it
+                    tool = tools_by_name[tool_name]
+                    
+                    # Execute with store context
+                    tool_result = tool.invoke(
+                        tool_args,
+                        config={"store": store}
+                    )
+                    
+                    # Create tool message with result
+                    tool_message = ToolMessage(
+                        content=str(tool_result),
+                        tool_call_id=tool_id,
+                        name=tool_name
+                    )
+                    
+                    llm_messages.append(tool_message)
+                    logger.info(f"Tool {tool_name} executed successfully")
+                    
+                except Exception as e:
+                    logger.error(f"Error executing tool {tool_name}: {e}")
+                    # Send error back to agent
+                    error_message = ToolMessage(
+                        content=f"Error: {str(e)}",
+                        tool_call_id=tool_id,
+                        name=tool_name
+                    )
+                    llm_messages.append(error_message)
+        
+        # Get final response (last message from LLM)
+        final_response = llm_messages[-1]
+        
+        # Add all new messages to state (including tool calls and responses)
+        state["messages"] = messages + llm_messages[len(messages) + 1:]
+        
+        logger.info("Agent response generated successfully")
+        return state
+        
+    except Exception as e:
+        logger.error(f"Error in agent_node: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        from langchain_core.messages import AIMessage
+        error_message = AIMessage(
+            content="I apologize, but I encountered an error. Please try again."
+        )
+        state["messages"] = state["messages"] + [error_message]
+        return state
+
+
+def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> AgentState:
+    """
+    Background memory extraction - simplified version.
+    The agent already saves memories via tools, so we don't need this.
+    """
+    logger.info("Background extraction disabled - agent manages memory via tools")
+    return state
 
 class StoreAssistantAgent:
     """
     High-level wrapper for the store assistant agent.
-    
-    This provides a clean interface for interacting with the agent,
-    handling configuration and thread management.
-    
-    Usage:
-        agent = StoreAssistantAgent()
-        
-        # Start conversation
-        response = agent.chat(
-            customer_id="sarah_123",
-            message="Hi, I need running shoes",
-            thread_id="thread_1"
-        )
-        
-        # Continue conversation
-        response = agent.chat(
-            customer_id="sarah_123",
-            message="Size 8 please",
-            thread_id="thread_1"
-        )
-        
-        # End session
-        agent.end_session(thread_id="thread_1")
     """
     
     def __init__(self):
@@ -172,21 +243,12 @@ class StoreAssistantAgent:
     
     def end_session(self, customer_id: str, thread_id: str):
         """
-        End a conversation session and trigger episode creation.
+        End a conversation session.
         
         Args:
             customer_id: Customer identifier
             thread_id: Conversation thread identifier
         """
-        # Send a final message with session_active=False
-        # This will trigger episode creation
-        self.chat(
-            customer_id=customer_id,
-            message="",  # Empty message
-            thread_id=thread_id,
-            session_active=False
-        )
-        
+        # For now, just log the session end
+        # In a full implementation, this would create an episode summary
         logger.info(f"Session ended for thread {thread_id}")
-
-

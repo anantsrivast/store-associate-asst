@@ -5,7 +5,7 @@ import os
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-# Now the rest of your imports
+# Now import everything else
 import streamlit as st
 from datetime import datetime
 from src.agent.graph import StoreAssistantAgent
@@ -57,32 +57,27 @@ def load_customer_memories(customer_id: str):
     try:
         store = db_manager.get_store()
         
-        # Get preferences - namespace_prefix is positional, not keyword
-        preferences = store.search(
-            ("customers", customer_id, "preferences"),
-            limit=20
-        )
+        # Search without query to get all memories
+        namespace = ("customers", customer_id, "memories")
         
-        # Get episodes
-        episodes = store.search(
-            ("customers", customer_id, "episodes"),
-            limit=10
-        )
-        
-        # Get insights
-        insights = store.search(
-            ("customers", customer_id, "insights"),
-            limit=10
-        )
+        try:
+            # Use search with empty query
+            memories_list = store.search(
+                namespace,
+                limit=20
+            )
+        except Exception as e:
+            logger.error(f"Error searching memories: {e}")
+            memories_list = []
         
         return {
-            "preferences": preferences,
-            "episodes": episodes,
-            "insights": insights
+            "memories": memories_list,
+            "count": len(memories_list)
         }
     except Exception as e:
         logger.error(f"Error loading memories: {e}")
-        return {"preferences": [], "episodes": [], "insights": []}
+        return {"memories": [], "count": 0}
+
 
 # Header
 st.title("🛍️ Store Associate Assistant")
@@ -125,12 +120,11 @@ if st.sidebar.button("🔄 New Session"):
 
 if st.sidebar.button("🛑 End Session"):
     if st.session_state.current_customer and st.session_state.messages:
-        # End the session (triggers episode creation)
         st.session_state.agent.end_session(
             customer_id=st.session_state.current_customer,
             thread_id=st.session_state.thread_id
         )
-        st.sidebar.success("Session ended. Episode summary created!")
+        st.sidebar.success("Session ended!")
         logger.info(f"Session ended for {st.session_state.current_customer}")
 
 # Sidebar - Memory View
@@ -139,36 +133,18 @@ st.sidebar.header("Customer Memories")
 if st.session_state.current_customer:
     memories = load_customer_memories(st.session_state.current_customer)
     
-    # Show memory counts
-    st.sidebar.metric("Preferences", len(memories["preferences"]))
-    st.sidebar.metric("Past Episodes", len(memories["episodes"]))
-    st.sidebar.metric("Insights", len(memories["insights"]))
+    # Show memory count
+    st.sidebar.metric("Stored Memories", memories["count"])
     
-    # Expandable sections for memory details
-    with st.sidebar.expander("View Preferences"):
-        if memories["preferences"]:
-            for pref in memories["preferences"][:5]:
-                st.write(f"**{pref.value.get('preference_type', 'N/A')}**: {pref.value.get('value', 'N/A')}")
-        else:
-            st.info("No preferences yet")
-    
-    with st.sidebar.expander("View Episodes"):
-        if memories["episodes"]:
-            for ep in memories["episodes"][:3]:
-                st.write(f"📅 {ep.value.get('date', 'N/A')}")
-                st.write(ep.value.get('summary', 'N/A'))
+    # Show memories if any exist
+    with st.sidebar.expander("View Memories"):
+        if memories["memories"]:
+            for mem in memories["memories"][:5]:
+                st.write(f"**Key**: {mem.key}")
+                st.write(f"**Value**: {str(mem.value)[:100]}...")
                 st.write("---")
         else:
-            st.info("No episodes yet")
-    
-    with st.sidebar.expander("View Insights"):
-        if memories["insights"]:
-            for insight in memories["insights"][:3]:
-                st.write(f"💡 {insight.value.get('pattern', 'N/A')}")
-                st.write(f"Confidence: {insight.value.get('confidence', 0):.2f}")
-                st.write("---")
-        else:
-            st.info("No insights yet")
+            st.info("No memories yet. Start chatting and mention preferences!")
 
 # Main Chat Interface
 st.header("💬 Conversation")
@@ -208,4 +184,5 @@ if prompt := st.chat_input("Type your message..."):
                 error_msg = f"Error: {str(e)}"
                 st.error(error_msg)
                 logger.error(f"Error in chat: {e}")
-
+                import traceback
+                traceback.print_exc()
