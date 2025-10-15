@@ -4,12 +4,69 @@ from langgraph.store.mongodb import MongoDBStore
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool as create_tool
+from langchain_core.messages.utils import count_tokens_approximately
+from langmem.short_term import SummarizationNode
+from langchain.chat_models import init_chat_model
 from src.agent.state import AgentState
 from src.database.mongodb_client import db_manager
 from src.config import config
+from datetime import datetime
+import uuid
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def check_summarization_node(state: AgentState) -> AgentState:
+    """
+    Check if conversation needs summarization.
+    
+    Counts tokens and sets needs_summarization flag.
+    """
+    try:
+        token_count = count_tokens_approximately(state["messages"])
+        logger.info(f"Current conversation has {token_count} tokens")
+        
+        needs_summary = token_count > config.memory.summarization_threshold
+        state["needs_summarization"] = needs_summary
+        
+        if needs_summary:
+            logger.info(f"Conversation exceeds threshold ({config.memory.summarization_threshold}), will summarize")
+        
+        return state
+    except Exception as e:
+        logger.error(f"Error in check_summarization_node: {e}")
+        state["needs_summarization"] = False
+        return state
+
+
+def summarize_conversation_node(state: AgentState) -> AgentState:
+    """
+    Compress the conversation using rolling summarization.
+    """
+    try:
+        if not state.get("needs_summarization", False):
+            return state
+        
+        logger.info("Starting conversation summarization")
+        
+        model = init_chat_model(config.llm.model)
+        
+        summarization_node = SummarizationNode(
+            token_counter=count_tokens_approximately,
+            model=model.bind(max_tokens=config.memory.max_summary_tokens),
+            max_tokens=config.memory.summarization_threshold,
+            max_tokens_before_summary=config.memory.summarization_threshold,
+            max_summary_tokens=config.memory.max_summary_tokens,
+        )
+        
+        summarized_state = summarization_node(state)
+        logger.info("Conversation summarized successfully")
+        
+        return summarized_state
+    except Exception as e:
+        logger.error(f"Error in summarize_conversation_node: {e}")
+        return state
 
 
 def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
@@ -40,30 +97,14 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
                 content: The information to remember (as a clear, concise string)
             """
             try:
-                import uuid
-                from datetime import datetime
-                
-                # Create a unique key
                 key = f"memory_{uuid.uuid4().hex[:8]}"
                 
-                # Store directly to avoid LangMem's internal data structure issues
                 value = {
                     "content": str(content),
                     "timestamp": datetime.now().isoformat(),
                     "type": "user_preference"
                 }
                 
-                # ADD ALL THESE DEBUG LINES
-                logger.info(f"=== DEBUG manage_memory ===")
-                logger.info(f"Namespace: {memory_namespace}")
-                logger.info(f"Key: {key}")
-                logger.info(f"Value: {value}")
-                logger.info(f"Value type: {type(value)}")
-                logger.info(f"Content type: {type(value['content'])}")
-                logger.info(f"Content length: {len(value['content'])}")
-                logger.info(f"=== END DEBUG ===")
-                
-                # Put directly into store
                 store.put(
                     namespace=memory_namespace,
                     key=key,
@@ -89,9 +130,8 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
                 query: What to search for in past memories
             """
             try:
-                # Search in the store - namespace is POSITIONAL argument
                 results = store.search(
-                    memory_namespace,  # First positional argument
+                    memory_namespace,
                     query=query,
                     limit=5
                 )
@@ -99,28 +139,23 @@ def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
                 if not results:
                     return "No relevant memories found."
                 
-                # Format results with more detail
                 memories = []
                 for idx, item in enumerate(results, 1):
                     content = item.value.get("content", "")
                     timestamp = item.value.get("timestamp", "")
-                    memory_type = item.value.get("type", "general")
-                    
-                    # Format the timestamp nicely
                     timestamp_str = timestamp[:10] if timestamp else "unknown date"
                     
-                    memories.append(f"{idx}. {content} (saved: {timestamp_str}, type: {memory_type})")
+                    memories.append(f"{idx}. {content} (saved: {timestamp_str})")
                 
                 logger.info(f"Found {len(results)} memories for query: {query}")
                 
-                # Return formatted memories
                 return "Found relevant memories:\n" + "\n".join(memories)
                 
             except Exception as e:
                 logger.error(f"Error searching memories: {e}", exc_info=True)
                 return f"Error searching memories: {str(e)}"
         
-        # Enhanced system prompt with clear tool selection guidelines
+        # Enhanced system prompt
         system_prompt = f"""You are a helpful and friendly store associate at a retail store.
 
 CUSTOMER INFORMATION:
@@ -132,15 +167,6 @@ When a customer asks for recommendations, follow this process:
 2. SECOND: Use search_products based on what you learned
 3. THIRD: Present the products with personalized context
 
-Example:
-Customer: "Show me products based on my interests"
-Step 1: search_memory("interests preferences activities") 
-Step 2: search_products("running shoes hiking gear") based on memory results
-Step 3: Present: "Based on your love of running and hiking, here are some great options..."
-
-CRITICAL INSTRUCTION - SHOWING SEARCH RESULTS:
-When you use search_products and it returns results, YOU MUST immediately show those products to the customer in your response. Do NOT stop after just searching memory - continue to search products and show results.
-
 TOOL SELECTION GUIDELINES:
 
 1. **For STRUCTURED FACTS** (shoe size, email, name):
@@ -148,28 +174,21 @@ TOOL SELECTION GUIDELINES:
 
 2. **For CONVERSATIONAL CONTEXT and PREFERENCES**:
    → Use search_memory(query)
-   → Then USE the results to inform product searches
 
 3. **For PRODUCT SEARCHES**:
    → Use search_products(query)
-   → Can call multiple times with different queries
-   → ALWAYS present the results immediately
 
-4. **When customer asks for recommendations "based on my interests"**:
-   → Step 1: search_memory("interests preferences activities")
-   → Step 2: search_products(relevant_query) using what you learned
-   → Step 3: Present products with personalized context
+4. **For PURCHASE HISTORY**:
+   → Use get_purchase_history('{customer_id}')
 
 5. **To save information**:
    → Structured facts → update_customer_profile
    → Conversational context → manage_memory
 
-Remember: Complete the full workflow before responding. If you search memory, use those results to search products too!
-
-Your goal is to be proactive, helpful, and show actual products, not just acknowledge the request.
+Your goal is to be proactive, helpful, and show actual products.
 """
         
-        # Initialize LLM with proper API key handling
+        # Initialize LLM
         if config.llm.anthropic_api_key:
             llm = ChatAnthropic(
                 model=config.llm.model,
@@ -207,12 +226,9 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
         
         llm_with_tools = llm.bind_tools(tools)
         
-        # Prepare initial messages with system prompt
-        full_messages = [
-            {"role": "system", "content": system_prompt}
-        ]
+        # Prepare messages
+        full_messages = [{"role": "system", "content": system_prompt}]
         
-        # Add conversation messages
         for msg in messages:
             if hasattr(msg, 'content'):
                 if msg.__class__.__name__ == 'HumanMessage':
@@ -220,24 +236,20 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                 elif msg.__class__.__name__ == 'AIMessage':
                     full_messages.append({"role": "assistant", "content": msg.content})
         
-        # ============= AGENT LOOP FOR MULTI-TOOL CALLS =============
+        # Agentic loop (up to 5 iterations)
+        current_messages = list(messages)
         max_iterations = 5
-        current_messages = messages.copy()
         
         for iteration in range(max_iterations):
             logger.info(f"Agent iteration {iteration + 1}/{max_iterations}")
             
-            # Get response from LLM
             response = llm_with_tools.invoke(full_messages)
             current_messages.append(response)
             
-            # Check if there are tool calls
             if not (hasattr(response, 'tool_calls') and response.tool_calls):
-                # No tool calls - agent is done
                 logger.info(f"Agent completed after {iteration + 1} iteration(s)")
                 break
             
-            # Execute tool calls
             logger.info(f"Agent wants to call {len(response.tool_calls)} tool(s)")
             
             tool_messages = []
@@ -247,7 +259,6 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                 
                 logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
                 
-                # Find and execute the tool
                 tool_to_execute = None
                 for t in tools:
                     if t.name == tool_name:
@@ -266,8 +277,6 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                         logger.info(f"Tool {tool_name} executed successfully")
                     except Exception as e:
                         logger.error(f"Error executing tool {tool_name}: {e}")
-                        import traceback
-                        traceback.print_exc()
                         tool_messages.append(
                             ToolMessage(
                                 content=f"Error: {str(e)}",
@@ -275,10 +284,8 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                             )
                         )
             
-            # Add tool results to messages
             current_messages.extend(tool_messages)
             
-            # Update full_messages for next iteration
             full_messages.append({
                 "role": "assistant", 
                 "content": response.content if response.content else "",
@@ -291,7 +298,6 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
                     "tool_call_id": tm.tool_call_id
                 })
         
-        # Update state with all messages
         state["messages"] = current_messages
         
         logger.info("Agent response generated successfully")
@@ -307,61 +313,146 @@ Your goal is to be proactive, helpful, and show actual products, not just acknow
         )
         state["messages"] = state["messages"] + [error_message]
         return state
+
+
 def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
-    Background memory extraction - disabled for now.
-    The agent manages memory via tools instead.
+    Extract semantic memories from conversation.
+    Currently simplified - agent handles via tools.
     """
-    logger.info("Background extraction disabled - agent manages memory via tools")
+    logger.info("Extract memories node (agent manages memory via tools)")
     return state
+
+
+def create_episode_node(state: AgentState, store: MongoDBStore) -> AgentState:
+    """
+    Create an episode summary when conversation ends.
+    """
+    try:
+        if state.get("session_active", True):
+            return state
+        
+        customer_id = state["customer_id"]
+        messages = state["messages"]
+        
+        logger.info(f"Creating episode summary for customer {customer_id}")
+        
+        episode_key = f"episode_{uuid.uuid4().hex[:8]}"
+        
+        episode_summary = {
+            "date": datetime.now().isoformat(),
+            "summary": f"Conversation with {len(messages)} messages",
+            "message_count": len(messages),
+            "created_at": datetime.now().isoformat()
+        }
+        
+        store.put(
+            namespace=("customers", customer_id, "episodes"),
+            key=episode_key,
+            value=episode_summary
+        )
+        
+        logger.info(f"Episode stored successfully: {episode_key}")
+        return state
+        
+    except Exception as e:
+        logger.error(f"Error in create_episode_node: {e}")
+        return state
+
+
+def route_after_summarization(state: AgentState) -> str:
+    """
+    Route after checking summarization.
+    Returns: "summarize" or "agent"
+    """
+    if state.get("needs_summarization", False):
+        logger.info("Routing to summarize node")
+        return "summarize"
+    logger.info("Routing directly to agent node")
+    return "agent"
+
+
+def route_after_agent(state: AgentState) -> str:
+    """
+    Route after agent processing.
+    Returns: "create_episode" or "extract_memories"
+    """
+    if not state.get("session_active", True):
+        logger.info("Session ending - routing to create_episode")
+        return "create_episode"
+    logger.info("Session active - routing to extract_memories")
+    return "extract_memories"
 
 
 def create_agent_graph():
     """
-    Create and compile the complete agent graph.
+    Create and compile the complete agent graph with full workflow.
     
-    The graph flow:
-    1. Entry → Agent
-    2. Agent → Extract Memories
-    3. Extract Memories → END
+    Graph Flow:
+    START → check_summarization → (conditional)
+        ├─> [needs_summarization=True] → summarize → agent
+        └─> [needs_summarization=False] → agent
+    
+    agent → (conditional)
+        ├─> [session_active=False] → create_episode → END
+        └─> [session_active=True] → extract_memories → END
     
     Returns:
         Compiled graph ready for execution
     """
-    logger.info("Building agent graph")
+    logger.info("Building agent graph with full workflow")
     
-    # Get MongoDB components
     checkpointer = db_manager.get_checkpointer()
     store = db_manager.get_store()
     
-    # Create the graph
     workflow = StateGraph(AgentState)
     
-    # Add nodes - using lambda to pass store to the node functions
+    # Add all nodes
+    workflow.add_node("check_summarization", check_summarization_node)
+    workflow.add_node("summarize", summarize_conversation_node)
     workflow.add_node("agent", lambda s: agent_node(s, store))
     workflow.add_node("extract_memories", lambda s: extract_semantic_memories_node(s, store))
+    workflow.add_node("create_episode", lambda s: create_episode_node(s, store))
     
-    # Define edges
-    workflow.set_entry_point("agent")
-    workflow.add_edge("agent", "extract_memories")
-    workflow.add_edge("extract_memories", END)
+    # Set entry point
+    workflow.set_entry_point("check_summarization")
     
-    # Compile the graph with checkpointer
-    graph = workflow.compile(
-        checkpointer=checkpointer
+    # Conditional edge from check_summarization
+    workflow.add_conditional_edges(
+        "check_summarization",
+        route_after_summarization,
+        {
+            "summarize": "summarize",
+            "agent": "agent"
+        }
     )
     
-    logger.info("Agent graph compiled successfully")
+    # Edge from summarize to agent
+    workflow.add_edge("summarize", "agent")
     
+    # Conditional edge from agent
+    workflow.add_conditional_edges(
+        "agent",
+        route_after_agent,
+        {
+            "create_episode": "create_episode",
+            "extract_memories": "extract_memories"
+        }
+    )
+    
+    # Edges to END
+    workflow.add_edge("extract_memories", END)
+    workflow.add_edge("create_episode", END)
+    
+    graph = workflow.compile(checkpointer=checkpointer)
+    
+    logger.info("Agent graph compiled successfully with full workflow")
     return graph
 
 
 class StoreAssistantAgent:
     """
     High-level wrapper for the store assistant agent.
-    
-    This provides a clean interface for interacting with the agent,
-    handling configuration and thread management.
     """
     
     def __init__(self):
@@ -386,16 +477,14 @@ class StoreAssistantAgent:
             session_active: Whether the session is still active
             
         Returns:
-            Agent's response text (only the final text, not tool calls)
+            Agent's response text
         """
-        # Create config with thread_id for checkpointing
         cfg = {
             "configurable": {
                 "thread_id": thread_id
             }
         }
         
-        # Create input state
         input_state = {
             "messages": [HumanMessage(content=message)],
             "customer_id": customer_id,
@@ -405,21 +494,15 @@ class StoreAssistantAgent:
             "metadata": {}
         }
         
-        # Invoke the graph
         result = self.graph.invoke(input_state, cfg)
         
-        # Extract the last AIMessage with actual text content
         result_messages = result["messages"]
         
-        # Find the last AI message that has text content (not tool calls)
         for msg in reversed(result_messages):
             if isinstance(msg, AIMessage):
-                # Check if it has text content (not just tool calls)
                 if hasattr(msg, 'content') and isinstance(msg.content, str) and msg.content.strip():
                     return msg.content
-                # If content is a list (like tool calls), skip it
                 elif hasattr(msg, 'content') and isinstance(msg.content, list):
-                    # Look for text blocks in the content
                     for block in msg.content:
                         if isinstance(block, dict) and block.get('type') == 'text':
                             text = block.get('text', '').strip()

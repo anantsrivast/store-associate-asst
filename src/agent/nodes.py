@@ -236,8 +236,230 @@ Current conversation:
         )
         state["messages"] = state["messages"] + [error_message]
         return state
-
 def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
+    """
+    Fixed agent node that ensures tool results are properly presented.
+    """
+    try:
+        customer_id = state["customer_id"]
+        messages = state["messages"]
+        
+        logger.info(f"Agent processing query for customer {customer_id}")
+        
+        memory_namespace = ("customers", customer_id, "memories")
+        
+        # Create memory tools
+        @create_tool
+        def manage_memory(content: str) -> str:
+            """Store important information about the customer."""
+            try:
+                key = f"memory_{uuid.uuid4().hex[:8]}"
+                value = {
+                    "content": str(content),
+                    "timestamp": datetime.now().isoformat(),
+                    "type": "user_preference"
+                }
+                store.put(namespace=memory_namespace, key=key, value=value)
+                return f"✓ Memory saved: {content[:80]}..."
+            except Exception as e:
+                return f"Error: {str(e)}"
+        
+        @create_tool
+        def search_memory(query: str) -> str:
+            """Search past memories about the customer."""
+            try:
+                results = store.search(memory_namespace, query=query, limit=5)
+                if not results:
+                    return "No relevant memories found."
+                
+                memories = []
+                for idx, item in enumerate(results, 1):
+                    content = item.value.get("content", "")
+                    timestamp = item.value.get("timestamp", "")[:10]
+                    memories.append(f"{idx}. {content} (from {timestamp})")
+                
+                return "=== RELEVANT MEMORIES ===\n" + "\n".join(memories)
+            except Exception as e:
+                return f"Error: {str(e)}"
+        
+        # IMPROVED system prompt with stronger instructions
+        system_prompt = f"""You are a store associate helping customer {customer_id}.
+
+CRITICAL RULE: When search_products returns results, you MUST format like this:
+
+1. **Product Name** - $Price - Brand
+2. **Product Name** - $Price - Brand
+
+NEVER say "these options" or "any of these" without listing them!
+
+CORRECT:
+"Here are Nike shoes:
+1. **Nike Pegasus 40** - $139.99 - Nike
+2. **Nike React Run** - $159.99 - Nike"
+
+WRONG:
+"Would you like to try these options?" ← NO! Show them!
+
+Available tools: get_customer_profile, update_customer_profile, search_products, get_purchase_history, manage_memory, search_memory
+
+After search_products, DISPLAY the products immediately in numbered list format.
+"""
+        
+        # Initialize LLM
+        if config.llm.anthropic_api_key:
+            llm = ChatAnthropic(
+                model=config.llm.model,
+                temperature=config.llm.temperature,
+                max_tokens=config.llm.max_tokens,
+                api_key=config.llm.anthropic_api_key
+            )
+        else:
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=config.llm.temperature,
+                max_tokens=config.llm.max_tokens,
+                api_key=config.llm.openai_api_key
+            )
+        
+        # Import tools
+        from src.agent.tools import (
+            search_products, 
+            get_customer_profile, 
+            update_customer_profile,
+            get_purchase_history
+        )
+        
+        tools = [
+            get_customer_profile,
+            update_customer_profile,
+            search_products,
+            get_purchase_history,
+            manage_memory,
+            search_memory
+        ]
+        
+        llm_with_tools = llm.bind_tools(tools)
+        
+        # Prepare messages
+        full_messages = [{"role": "system", "content": system_prompt}]
+        
+        for msg in messages:
+            if hasattr(msg, 'content'):
+                if msg.__class__.__name__ == 'HumanMessage':
+                    full_messages.append({"role": "user", "content": msg.content})
+                elif msg.__class__.__name__ == 'AIMessage':
+                    full_messages.append({"role": "assistant", "content": msg.content})
+        
+        # IMPROVED agentic loop
+        current_messages = messages.copy()
+        max_iterations = 5
+        tool_calls_made = False  # Track if we've called tools
+        
+        for iteration in range(max_iterations):
+            logger.info(f"Agent iteration {iteration + 1}/{max_iterations}")
+            
+            # Get response from LLM
+            response = llm_with_tools.invoke(full_messages)
+            current_messages.append(response)
+            
+            # Check if there are tool calls
+            has_tool_calls = hasattr(response, 'tool_calls') and response.tool_calls
+            
+            if not has_tool_calls:
+                # No tool calls
+                if tool_calls_made and iteration == 1:
+                    # We just executed tools but agent didn't use results!
+                    logger.warning("Agent didn't use tool results - forcing continuation")
+                    
+                    # Add a system message to force agent to use results
+                    full_messages.append({
+                        "role": "system",
+                        "content": "IMPORTANT: You just received tool results above. You MUST present those results to the user now. Show the actual products/data from the tools."
+                    })
+                    continue  # Force another iteration
+                else:
+                    # Agent is done
+                    logger.info(f"Agent completed after {iteration + 1} iteration(s)")
+                    break
+            
+            # Execute tool calls
+            logger.info(f"Agent wants to call {len(response.tool_calls)} tool(s)")
+            tool_calls_made = True
+            
+            tool_messages = []
+            for tool_call in response.tool_calls:
+                tool_name = tool_call['name']
+                tool_args = tool_call['args']
+                
+                logger.info(f"Executing tool: {tool_name} with args: {tool_args}")
+                
+                # Find and execute the tool
+                tool_to_execute = None
+                for t in tools:
+                    if t.name == tool_name:
+                        tool_to_execute = t
+                        break
+                
+                if tool_to_execute:
+                    try:
+                        result = tool_to_execute.invoke(tool_args)
+                        
+                        # Add clear markers to tool results
+                        formatted_result = f"=== TOOL RESULT: {tool_name} ===\n{result}\n=== END RESULT ==="
+                        
+                        tool_messages.append(
+                            ToolMessage(
+                                content=formatted_result,
+                                tool_call_id=tool_call['id']
+                            )
+                        )
+                        logger.info(f"Tool {tool_name} executed successfully")
+                        logger.info(f"Result preview: {str(result)[:200]}")
+                    except Exception as e:
+                        logger.error(f"Error executing tool {tool_name}: {e}")
+                        tool_messages.append(
+                            ToolMessage(
+                                content=f"Error: {str(e)}",
+                                tool_call_id=tool_call['id']
+                            )
+                        )
+            
+            # Add tool results to messages
+            current_messages.extend(tool_messages)
+            
+            # Update full_messages for next iteration
+            full_messages.append({
+                "role": "assistant", 
+                "content": response.content if response.content else "",
+                "tool_calls": response.tool_calls
+            })
+            
+            for tm in tool_messages:
+                full_messages.append({
+                    "role": "tool", 
+                    "content": str(tm.content), 
+                    "tool_call_id": tm.tool_call_id
+                })
+        
+        # Update state with all messages
+        state["messages"] = current_messages
+        
+        logger.info("Agent response generated successfully")
+        return state
+        
+    except Exception as e:
+        logger.error(f"Error in agent_node: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        error_message = AIMessage(
+            content="I apologize, but I encountered an error. Please try again."
+        )
+        state["messages"] = state["messages"] + [error_message]
+        return state
+
+def agent_node_ltst_bkp(state: AgentState, store: MongoDBStore) -> AgentState:
     """
     Main agent node with LangMem memory tools and improved tool selection.
     """
