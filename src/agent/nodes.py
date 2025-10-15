@@ -1,73 +1,40 @@
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.tools import tool as create_tool
 from langchain_core.messages.utils import count_tokens_approximately
-from langchain.chat_models import init_chat_model
+from langchain_anthropic import ChatAnthropic
 from langgraph.store.mongodb import MongoDBStore
 from langmem.short_term import SummarizationNode
-from src.agent.state import AgentState, LLMInputState
-from src.memory.managers import MemoryManagers
-from src.memory.models import RunningSummary
+from langchain.chat_models import init_chat_model
+from src.agent.state import AgentState
 from src.config import config
 from datetime import datetime
+import uuid
 import logging
+import os
 
 logger = logging.getLogger(__name__)
-
-
-def create_summarization_node():
-    """
-    Create the conversation summarization node.
-
-    This node compresses long conversations to fit within context limits.
-    It uses LangMem's SummarizationNode to create rolling summaries.
-
-    Returns:
-        SummarizationNode instance configured for our use case
-    """
-    model = init_chat_model(config.llm.model)
-
-    return SummarizationNode(
-        token_counter=count_tokens_approximately,
-        model=model.bind(max_tokens=config.memory.max_summary_tokens),
-        max_tokens=config.memory.summarization_threshold,
-        max_tokens_before_summary=config.memory.summarization_threshold,
-        max_summary_tokens=config.memory.max_summary_tokens,
-    )
 
 
 def check_summarization_node(state: AgentState) -> AgentState:
     """
     Check if conversation needs summarization.
-
-    This node counts tokens in the conversation and sets a flag
-    if summarization is needed.
-
-    Args:
-        state: Current agent state
-
-    Returns:
-        Updated state with needs_summarization flag set
+    
+    Counts tokens and sets needs_summarization flag.
     """
     try:
-        # Count tokens in the conversation
         token_count = count_tokens_approximately(state["messages"])
-
         logger.info(f"Current conversation has {token_count} tokens")
-
-        # Check if we exceed the threshold
+        
         needs_summary = token_count > config.memory.summarization_threshold
-
-        # Update state
         state["needs_summarization"] = needs_summary
-
+        
         if needs_summary:
-            logger.info("Conversation exceeds threshold, will summarize")
-
+            logger.info(f"Conversation exceeds threshold ({config.memory.summarization_threshold}), will summarize")
+        
         return state
-
     except Exception as e:
         logger.error(f"Error in check_summarization_node: {e}")
-        # Continue without summarization on error
         state["needs_summarization"] = False
         return state
 
@@ -75,288 +42,282 @@ def check_summarization_node(state: AgentState) -> AgentState:
 def summarize_conversation_node(state: AgentState) -> AgentState:
     """
     Compress the conversation using rolling summarization.
-
-    This node is called when the conversation gets too long. It:
-    1. Creates a summary of older messages
-    2. Keeps recent messages intact
-    3. Stores the summary in state["context"]
-
-    Args:
-        state: Current agent state
-
-    Returns:
-        Updated state with compressed conversation
     """
     try:
         if not state.get("needs_summarization", False):
-            # No summarization needed
             return state
-
+        
         logger.info("Starting conversation summarization")
-
-        # Get or create summarization node
-        summarization_node = create_summarization_node()
-
-        # Apply summarization
-        # This modifies state["context"] with running summary
+        
+        model = init_chat_model(config.llm.model)
+        
+        summarization_node = SummarizationNode(
+            token_counter=count_tokens_approximately,
+            model=model.bind(max_tokens=config.memory.max_summary_tokens),
+            max_tokens=config.memory.summarization_threshold,
+            max_tokens_before_summary=config.memory.summarization_threshold,
+            max_summary_tokens=config.memory.max_summary_tokens,
+        )
+        
         summarized_state = summarization_node(state)
-
         logger.info("Conversation summarized successfully")
-
+        
         return summarized_state
-
     except Exception as e:
         logger.error(f"Error in summarize_conversation_node: {e}")
-        # Return original state on error
-        return state
-
-
-def agent_node_1(state: AgentState, store: MongoDBStore) -> AgentState:
-    """
-    Main agent node that processes user queries.
-
-    This is the core of the agent. It:
-    1. Retrieves relevant memories from the store
-    2. Builds context from memories and conversation
-    3. Calls the LLM to generate a response
-    4. Returns the response in updated state
-
-    Args:
-        state: Current agent state
-        store: MongoDBStore for accessing memories
-
-    Returns:
-        Updated state with agent's response
-    """
-    try:
-        customer_id = state["customer_id"]
-        messages = state["messages"]
-
-        # Get the latest user message
-        latest_message = messages[-1].content if messages else ""
-
-        logger.info(f"Agent processing query for customer {customer_id}")
-
-        # Retrieve relevant memories
-        # 1. Search episodic memories (past interactions)
-        episodic_memories = store.search(
-            ("customers", customer_id, "episodes"),
-            query=latest_message,
-            limit=3
-        )
-
-        # 2. Get semantic facts (preferences)
-        semantic_memories = store.search(
-            ("customers", customer_id, "preferences"),
-            limit=10
-        )
-
-        # 3. Get consolidated insights
-        insights = store.search(
-            ("customers", customer_id, "insights"),
-            limit=5
-        )
-
-        logger.info(
-            f"Retrieved {len(episodic_memories)} episodes, "
-            f"{len(semantic_memories)} preferences, "
-            f"{len(insights)} insights"
-        )
-
-        # Build memory context for the LLM
-        memory_context = _build_memory_context(
-            episodic_memories,
-            semantic_memories,
-            insights
-        )
-
-        # Create system prompt with memory context
-        system_prompt = f"""You are a helpful store associate at a retail store.
-        
-You have access to the customer's history and preferences to provide personalized service.
-
-{memory_context}
-
-Guidelines:
-- Be friendly, helpful, and professional
-- Reference past interactions naturally when relevant
-- Make personalized recommendations based on preferences
-- Ask clarifying questions when needed
-- Use tools to search products or get more information
-- Be honest if you don't have information
-
-Current conversation:
-"""
-
-        # Initialize LLM
-        model = init_chat_model(
-            config.llm.model,
-            temperature=config.llm.temperature,
-            max_tokens=config.llm.max_tokens
-        )
-
-        # Bind tools to the model
-        from src.agent.tools import search_products, get_customer_profile, get_purchase_history
-        from langmem import create_manage_memory_tool, create_search_memory_tool
-
-        # Create memory tools
-        manage_memory = create_manage_memory_tool()
-        search_memory = create_search_memory_tool()
-
-        tools = [
-            search_products,
-            get_customer_profile,
-            get_purchase_history,
-            manage_memory,
-            search_memory
-        ]
-
-        model_with_tools = model.bind_tools(tools)
-
-        # Prepare messages with system prompt
-        llm_messages = [
-            HumanMessage(content=system_prompt)
-        ] + messages
-
-        # Get response from LLM
-        response = model_with_tools.invoke(llm_messages)
-
-        # Add response to messages
-        state["messages"] = messages + [response]
-
-        logger.info("Agent response generated successfully")
-
-        return state
-
-    except Exception as e:
-        logger.error(f"Error in agent_node: {e}")
-        # Add error message to conversation
-        error_message = AIMessage(
-            content="I apologize, but I encountered an error. Please try again."
-        )
-        state["messages"] = state["messages"] + [error_message]
         return state
 
 
 def agent_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
-    Fixed agent node that ensures tool results are properly presented.
+    Main agent node using LangGraph MongoDBStore with vector search.
+    
+    This node:
+    1. Checks if session is ending (skip processing if so)
+    2. Creates memory tools for the customer
+    3. Prepares system prompt with clear tool usage guidelines
+    4. Runs agentic loop (up to 5 iterations) for multi-tool calls
+    5. Forces final response if max iterations reached
     """
     try:
+        # Check if session is ending - skip agent processing if so
+        if not state.get("session_active", True):
+            logger.info("Session ending - skipping agent processing")
+            return state
+        
         customer_id = state["customer_id"]
         messages = state["messages"]
-
+        
         logger.info(f"Agent processing query for customer {customer_id}")
-
+        
+        # Memory namespace for this customer
         memory_namespace = ("customers", customer_id, "memories")
-
-        # Create memory tools
+        
+        # ============= MEMORY TOOLS =============
         @create_tool
         def manage_memory(content: str) -> str:
-            """Store important information about the customer."""
+            """
+            Store important information about the customer for future reference.
+            
+            Use this to save:
+            - Customer preferences and interests
+            - Important context from conversations
+            - Things the customer wants you to remember
+            
+            Args:
+                content: The information to remember (as a clear, concise string)
+            """
             try:
                 key = f"memory_{uuid.uuid4().hex[:8]}"
+                
                 value = {
                     "content": str(content),
                     "timestamp": datetime.now().isoformat(),
                     "type": "user_preference"
                 }
-                store.put(namespace=memory_namespace, key=key, value=value)
-                return f"✓ Memory saved: {content[:80]}..."
+                
+                store.put(
+                    namespace=memory_namespace,
+                    key=key,
+                    value=value
+                )
+                
+                return f"✓ Memory saved: {content[:100]}..."
             except Exception as e:
-                return f"Error: {str(e)}"
-
+                logger.error(f"Error saving memory: {e}", exc_info=True)
+                return f"Error saving memory: {str(e)}"
+        
         @create_tool
         def search_memory(query: str) -> str:
-            """Search past memories about the customer."""
+            """
+            Search for relevant past interactions and stored information about the customer.
+            
+            Use this to recall:
+            - What you know about the customer
+            - Past conversations and context
+            - Customer preferences and history
+            
+            Args:
+                query: What to search for in past memories
+            """
             try:
-                results = store.search(memory_namespace, query=query, limit=5)
+                results = store.search(
+                    memory_namespace,
+                    query=query,
+                    limit=5
+                )
+                
                 if not results:
                     return "No relevant memories found."
-
+                
                 memories = []
                 for idx, item in enumerate(results, 1):
                     content = item.value.get("content", "")
-                    timestamp = item.value.get("timestamp", "")[:10]
-                    memories.append(f"{idx}. {content} (from {timestamp})")
-
-                return "=== RELEVANT MEMORIES ===\n" + "\n".join(memories)
+                    timestamp = item.value.get("timestamp", "")
+                    timestamp_str = timestamp[:10] if timestamp else "unknown date"
+                    
+                    memories.append(f"{idx}. {content} (saved: {timestamp_str})")
+                
+                logger.info(f"Found {len(results)} memories for query: {query}")
+                
+                return "Found relevant memories:\n" + "\n".join(memories)
+                
             except Exception as e:
-                return f"Error: {str(e)}"
+                logger.error(f"Error searching memories: {e}", exc_info=True)
+                return f"Error searching memories: {str(e)}"
+        
+        # ============= SYSTEM PROMPT =============
+        system_prompt = f"""You are a helpful store associate at a retail store helping customer {customer_id}.
 
-        # IMPROVED system prompt with stronger instructions
-        system_prompt = f"""You are a store associate helping customer {customer_id}.
+🧠 CONVERSATION CONTEXT:
+You have access to the FULL conversation history. Before responding:
+- Read the ENTIRE conversation to understand context
+- If customer says "yes/sure/okay" after you offered something → DO that thing immediately
+- Understand pronouns ("it", "that", "those") refer to things just discussed
+- Don't treat follow-ups as new conversations
 
-CRITICAL RULE: When search_products returns results, you MUST format like this:
+Example:
+You: "Would you like me to show you Nike shoes in size 10?"
+Customer: "Yes please"
+You: [Call search_products("Nike shoes size 10")] ← DO IT NOW, don't ask again!
 
+═══════════════════════════════════════════════════════════════════
+
+🚨 CRITICAL RULE 1: PRODUCT DISPLAY FORMAT
+
+When search_products returns results, you MUST display them immediately in this EXACT format:
+
+Here are [description]:
 1. **Product Name** - $Price - Brand
 2. **Product Name** - $Price - Brand
+3. **Product Name** - $Price - Brand
 
-NEVER say "these options" or "any of these" without listing them!
-
-CORRECT:
-"Here are Nike shoes:
+✅ CORRECT:
+"Here are some Nike running shoes for you:
 1. **Nike Pegasus 40** - $139.99 - Nike
-2. **Nike React Run** - $159.99 - Nike"
+2. **Nike React Infinity** - $159.99 - Nike
+3. **Nike Air Zoom** - $119.99 - Nike"
 
-WRONG:
-"Would you like to try these options?" ← NO! Show them!
+❌ WRONG:
+- "Would you like to see these options?" (Show them NOW!)
+- "I found some great shoes" (What shoes? List them!)
+- "Here are some options for you" (Which options? Display them!)
 
-Available tools: get_customer_profile, update_customer_profile, search_products, get_purchase_history, manage_memory, search_memory
+NEVER reference products without showing them. Always present the numbered list immediately after calling search_products.
 
-After search_products, DISPLAY the products immediately in numbered list format.
+═══════════════════════════════════════════════════════════════════
 
-TOOL SELECTION GUIDELINES - VERY IMPORTANT:
+🚨 CRITICAL RULE 2: WHEN TO USE TOOLS vs RESPOND NATURALLY
 
-1. **For factual customer data** (shoe size, name, email, preferred brands, loyalty tier):
-   → ALWAYS use get_customer_profile('{customer_id}')
-   → This retrieves structured data stored in the customer's profile
-   → Example: "What's my shoe size?" → Use get_customer_profile
+✅ RESPOND NATURALLY (NO TOOLS) when:
+- Customer is chatting casually ("hi", "hello", "how are you", "thanks")
+- Customer shares feelings ("I don't like anything these days")
+- Customer makes life statements ("I only like walking")
+- Customer gives confirmations ("yes please", "sure", "okay") → DO what you offered
+- Conversation is emotional or empathetic
 
-2. **To update customer data** when they share new facts:
-   → Use update_customer_profile('{customer_id}', updates)
-   → Example: User says "I wear size 8" → update_customer_profile('{customer_id}', {{"shoe_size": 8}})
-   → Then ALSO save context to memory with manage_memory()
+❌ USE TOOLS when:
+- Customer explicitly asks for products ("show me shoes", "find Nike shoes")
+- Customer asks about history ("what did I buy?", "what do you know about me?")
+- Customer mentions new preferences ("I like Nike", "I wear size 10")
+- You need information you don't have
 
-3. **For past purchases**:
-   → Use get_purchase_history('{customer_id}')
-   → Shows what they've bought before
+═══════════════════════════════════════════════════════════════════
 
-4. **For product searches**:
-   → Use search_products(query, category)
-   → Example: "Show me running shoes" → search_products("running shoes", "shoes")
+🔧 TOOL SELECTION GUIDE
 
-5. **For conversational context and preferences** (not structured facts):
-   → Use search_memory(query)
-   → Example: "What did I say about marathon training?" → search_memory("marathon training")
+**1. get_customer_profile('{customer_id}')**
+Use for: Structured data (name, email, shoe_size, preferred_brands)
+Example: "What's my shoe size?" → get_customer_profile
 
-6. **To save new conversational insights**:
-   → Use manage_memory(content)
-   → Save contextual information, preferences, conversation summaries
-   → Example: "Customer mentioned training for a marathon"
+**2. update_customer_profile('{customer_id}', updates)**
+Use for: Updating structured data
+Example: "I wear size 10" → update_customer_profile('{customer_id}', {{"shoe_size": 10}})
+Note: ALSO call manage_memory to save conversational context
 
-WORKFLOW EXAMPLE:
-- User: "I wear size 8 Nike shoes"
-- Step 1: update_customer_profile('{customer_id}', {{"shoe_size": 8, "preferred_brands": ["Nike"]}})
-- Step 2: manage_memory("Customer prefers Nike brand and wears size 8")
-- Response: "Got it! I've saved that you wear size 8 and prefer Nike. I'll remember this for next time!"
+**3. search_products(query, category=None)**
+Use for: Finding products to show
+Example: "Show me Nike shoes" → search_products("Nike shoes")
+CRITICAL: Always DISPLAY results in numbered format (see Rule 1)
 
-- User: "What's my shoe size?"
-- Step 1: get_customer_profile('{customer_id}')
-- Step 2: Read shoe_size from the returned profile
-- Response: "Your shoe size is 8!"
+**4. get_purchase_history('{customer_id}')**
+Use for: Past purchase data
+Example: "What did I buy?" → get_purchase_history
 
-GUIDELINES:
-- Be friendly, helpful, and professional
-- Reference past information naturally when relevant
-- Make personalized recommendations based on preferences
-- Ask clarifying questions when needed
-- Always use the appropriate tool for the type of information requested
+**5. search_memory(query)**
+Use for: Conversational context, preferences, past discussions
+When: ALWAYS call FIRST when customer asks for products
+Example: "Show me shoes" → search_memory("preferences brands") THEN search_products
 
+**6. manage_memory(content)**
+Use for: Saving new preferences and context
+When: Customer mentions preferences, after showing products they liked
+Example: "I like Nike" → After showing Nike → manage_memory("Customer prefers Nike brand")
 
+═══════════════════════════════════════════════════════════════════
+
+📋 MANDATORY WORKFLOWS
+
+**WORKFLOW 1: Product Request (e.g., "Show me shoes")**
+Step 1: search_memory("shoe preferences brand size style history")
+Step 2: search_products(query based on memory results)
+Step 3: DISPLAY products immediately in numbered format
+Step 4: If customer showed interest → manage_memory(preference)
+
+**WORKFLOW 2: Customer Mentions Preference (e.g., "I like Nike")**
+Step 1: search_products(preference)
+Step 2: DISPLAY products in numbered format
+Step 3: manage_memory("Customer prefers [preference]")
+
+**WORKFLOW 3: Confirmation (e.g., "Yes please")**
+Step 1: Look at YOUR previous message to see what you offered
+Step 2: DO that thing immediately (call search_products)
+Step 3: DISPLAY results
+
+**WORKFLOW 4: Customer Shares Data (e.g., "I wear size 10")**
+Step 1: update_customer_profile('{customer_id}', {{"shoe_size": 10}})
+Step 2: manage_memory("Customer wears shoe size 10")
+Step 3: Confirm: "Got it! I've saved that you wear size 10."
+
+═══════════════════════════════════════════════════════════════════
+
+🎯 CRITICAL MEMORY RULES
+
+1. **ALWAYS search_memory FIRST** for product requests
+   - Don't skip this even if query seems generic
+   - Use results to personalize recommendations
+
+2. **ALWAYS manage_memory** when customer mentions preferences
+   - Brand preferences: "Customer prefers Nike"
+   - Size info: "Customer wears size 10"
+   - Activities: "Customer enjoys walking at night"
+
+3. **DON'T ask twice after confirmations**
+   - If you offered something and customer says "yes" → DO IT
+   - Read conversation history before responding
+
+4. **Format for manage_memory**:
+   - Clear, factual: "Customer prefers [X]" or "Customer mentioned [Y]"
+
+═══════════════════════════════════════════════════════════════════
+
+📝 RESPONSE GUIDELINES
+
+✓ Be warm, friendly, and conversational
+✓ Show empathy when customers share feelings
+✓ Present products immediately after searching (numbered list)
+✓ Use memory to personalize recommendations
+✓ Understand confirmations and follow-ups
+
+✗ Don't say "these options" without showing them
+✗ Don't ask "what would you like?" after customer confirmed
+✗ Don't search products without checking memory first
+✗ Don't forget to save preferences when mentioned
+
+Remember: You're a helpful human who remembers preferences, understands context, and shows products clearly!
 """
-
-        # Initialize LLM
+        
+        # ============= INITIALIZE LLM =============
         if config.llm.anthropic_api_key:
             llm = ChatAnthropic(
                 model=config.llm.model,
@@ -364,7 +325,7 @@ GUIDELINES:
                 max_tokens=config.llm.max_tokens,
                 api_key=config.llm.anthropic_api_key
             )
-        else:
+        elif config.llm.openai_api_key:
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(
                 model="gpt-4o-mini",
@@ -372,15 +333,17 @@ GUIDELINES:
                 max_tokens=config.llm.max_tokens,
                 api_key=config.llm.openai_api_key
             )
-
-        # Import tools
+        else:
+            raise ValueError("Either ANTHROPIC_API_KEY or OPENAI_API_KEY must be set in .env file")
+        
+        # ============= IMPORT AND BIND TOOLS =============
         from src.agent.tools import (
-            search_products,
-            get_customer_profile,
+            search_products, 
+            get_customer_profile, 
             update_customer_profile,
             get_purchase_history
         )
-
+        
         tools = [
             get_customer_profile,
             update_customer_profile,
@@ -389,560 +352,224 @@ GUIDELINES:
             manage_memory,
             search_memory
         ]
-
+        
         llm_with_tools = llm.bind_tools(tools)
-
-        # Prepare messages
+        
+        # ============= PREPARE MESSAGES =============
         full_messages = [{"role": "system", "content": system_prompt}]
-
+        
         for msg in messages:
             if hasattr(msg, 'content'):
                 if msg.__class__.__name__ == 'HumanMessage':
-                    full_messages.append(
-                        {"role": "user", "content": msg.content})
+                    full_messages.append({"role": "user", "content": msg.content})
                 elif msg.__class__.__name__ == 'AIMessage':
-                    full_messages.append(
-                        {"role": "assistant", "content": msg.content})
-
-        # IMPROVED agentic loop
-        current_messages = messages.copy()
+                    # Handle AIMessage with or without tool calls
+                    msg_dict = {"role": "assistant", "content": msg.content if msg.content else ""}
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        msg_dict["tool_calls"] = msg.tool_calls
+                    full_messages.append(msg_dict)
+                elif msg.__class__.__name__ == 'ToolMessage':
+                    full_messages.append({
+                        "role": "tool",
+                        "content": msg.content,
+                        "tool_call_id": msg.tool_call_id
+                    })
+        
+        # ============= AGENTIC LOOP (UP TO 5 ITERATIONS) =============
+        current_messages = list(messages)
         max_iterations = 5
-        tool_calls_made = False  # Track if we've called tools
-
+        
         for iteration in range(max_iterations):
             logger.info(f"Agent iteration {iteration + 1}/{max_iterations}")
-
-            # Get response from LLM
+            
+            # FORCE FINAL RESPONSE on last iteration
+            if iteration == max_iterations - 1:
+                logger.warning(f"Reached max iterations ({max_iterations}). Forcing final response without tools.")
+                
+                # Use LLM without tools to guarantee text response
+                llm_no_tools = ChatAnthropic(
+                    model=config.llm.model,
+                    temperature=config.llm.temperature,
+                    max_tokens=config.llm.max_tokens,
+                    api_key=config.llm.anthropic_api_key
+                )
+                
+                force_msg = {
+                    "role": "user", 
+                    "content": "Please provide your final response to the customer now based on what you know. Do NOT call any more tools."
+                }
+                
+                response = llm_no_tools.invoke(full_messages + [force_msg])
+                current_messages.append(response)
+                logger.info("✓ Forced final response generated")
+                break
+            
+            # Normal iteration with tools
             response = llm_with_tools.invoke(full_messages)
             current_messages.append(response)
-
-            # Check if there are tool calls
-            has_tool_calls = hasattr(
-                response, 'tool_calls') and response.tool_calls
-
-            if not has_tool_calls:
-                # No tool calls
-                if tool_calls_made and iteration == 1:
-                    # We just executed tools but agent didn't use results!
-                    logger.warning(
-                        "Agent didn't use tool results - forcing continuation")
-
-                    # Add a system message to force agent to use results
-                    full_messages.append({
-                        "role": "system",
-                        "content": "IMPORTANT: You just received tool results above. You MUST present those results to the user now. Show the actual products/data from the tools."
-                    })
-                    continue  # Force another iteration
-                else:
-                    # Agent is done
-                    logger.info(
-                        f"Agent completed after {iteration + 1} iteration(s)")
-                    break
-
-            # Execute tool calls
-            logger.info(
-                f"Agent wants to call {len(response.tool_calls)} tool(s)")
-            tool_calls_made = True
-
+            
+            # Check if agent wants to call tools
+            if not (hasattr(response, 'tool_calls') and response.tool_calls):
+                logger.info(f"✓ Agent completed naturally after {iteration + 1} iteration(s)")
+                break
+            
+            # Agent wants to call tools
+            logger.info(f"Agent wants to call {len(response.tool_calls)} tool(s)")
+            
+            # IMPROVED LOGGING: Show which tools and args
+            for i, tc in enumerate(response.tool_calls, 1):
+                logger.info(f"  Tool {i}: {tc['name']} | Args: {tc.get('args', {})}")
+            
+            # Execute tools
             tool_messages = []
             for tool_call in response.tool_calls:
                 tool_name = tool_call['name']
                 tool_args = tool_call['args']
-
-                logger.info(
-                    f"Executing tool: {tool_name} with args: {tool_args}")
-
-                # Find and execute the tool
+                
+                # Find the tool
                 tool_to_execute = None
                 for t in tools:
                     if t.name == tool_name:
                         tool_to_execute = t
                         break
-
+                
                 if tool_to_execute:
                     try:
                         result = tool_to_execute.invoke(tool_args)
-
-                        # Add clear markers to tool results
-                        formatted_result = f"=== TOOL RESULT: {tool_name} ===\n{result}\n=== END RESULT ==="
-
+                        
+                        # Log tool result (first 200 chars)
+                        result_preview = str(result)[:200]
+                        logger.info(f"  ✓ {tool_name} returned: {result_preview}{'...' if len(str(result)) > 200 else ''}")
+                        
                         tool_messages.append(
                             ToolMessage(
-                                content=formatted_result,
+                                content=str(result),
                                 tool_call_id=tool_call['id']
                             )
                         )
-                        logger.info(f"Tool {tool_name} executed successfully")
-                        logger.info(f"Result preview: {str(result)[:200]}")
                     except Exception as e:
-                        logger.error(f"Error executing tool {tool_name}: {e}")
+                        logger.error(f"  ✗ Error executing {tool_name}: {e}")
                         tool_messages.append(
                             ToolMessage(
                                 content=f"Error: {str(e)}",
                                 tool_call_id=tool_call['id']
                             )
                         )
-
-            # Add tool results to messages
+                else:
+                    logger.error(f"  ✗ Unknown tool: {tool_name}")
+            
+            # Add tool results to conversation
             current_messages.extend(tool_messages)
-
+            
             # Update full_messages for next iteration
             full_messages.append({
-                "role": "assistant",
+                "role": "assistant", 
                 "content": response.content if response.content else "",
                 "tool_calls": response.tool_calls
             })
-
             for tm in tool_messages:
                 full_messages.append({
-                    "role": "tool",
-                    "content": str(tm.content),
+                    "role": "tool", 
+                    "content": str(tm.content), 
                     "tool_call_id": tm.tool_call_id
                 })
-
+        
         # Update state with all messages
         state["messages"] = current_messages
-
+        
         logger.info("Agent response generated successfully")
         return state
-
+        
     except Exception as e:
         logger.error(f"Error in agent_node: {e}")
         import traceback
         traceback.print_exc()
-
+        
         error_message = AIMessage(
             content="I apologize, but I encountered an error. Please try again."
         )
         state["messages"] = state["messages"] + [error_message]
         return state
-
-
-def agent_node_ltst_bkp(state: AgentState, store: MongoDBStore) -> AgentState:
-    """
-    Main agent node with LangMem memory tools and improved tool selection.
-    """
-    try:
-        from langchain_core.messages import HumanMessage, AIMessage
-        from langchain_anthropic import ChatAnthropic
-        from langmem import create_manage_memory_tool, create_search_memory_tool
-
-        customer_id = state["customer_id"]
-        messages = state["messages"]
-
-        logger.info(f"Agent processing query for customer {customer_id}")
-        latest_message = messages[-1].content if messages else ""
-
-        # ADD THIS DEBUG
-        logger.info(f"=== AGENT DECISION DEBUG ===")
-        logger.info(f"User asked: {latest_message}")
-        logger.info(f"Customer ID: {customer_id}")
-        logger.info(f"Available tools: {[tool.name for tool in tools]}")
-        logger.info(f"=== END DEBUG ===")
-        # Create memory tools for this customer
-        memory_namespace = ("customers", customer_id, "memories")
-
-        manage_memory = create_manage_memory_tool(
-            namespace=memory_namespace
-        )
-
-        search_memory = create_search_memory_tool(
-            namespace=memory_namespace
-        )
-
-        # Enhanced system prompt with clear tool selection guidelines
-        system_prompt = f"""You are a helpful and friendly store associate at a retail store.
-
-CUSTOMER INFORMATION:
-You are currently helping customer_id: {customer_id}
-
-TOOL SELECTION GUIDELINES - VERY IMPORTANT:
-
-1. **For factual customer data** (shoe size, name, email, preferred brands, loyalty tier):
-   → ALWAYS use get_customer_profile('{customer_id}')
-   → This retrieves structured data stored in the customer's profile
-   → Example: "What's my shoe size?" → Use get_customer_profile
-
-2. **To update customer data** when they share new facts:
-   → Use update_customer_profile('{customer_id}', updates)
-   → Example: User says "I wear size 8" → update_customer_profile('{customer_id}', {{"shoe_size": 8}})
-   → Then ALSO save context to memory with manage_memory()
-
-3. **For past purchases**:
-   → Use get_purchase_history('{customer_id}')
-   → Shows what they've bought before
-
-4. **For product searches**:
-   → Use search_products(query, category)
-   → Example: "Show me running shoes" → search_products("running shoes", "shoes")
-
-5. **For conversational context and preferences** (not structured facts):
-   → Use search_memory(query)
-   → Example: "What did I say about marathon training?" → search_memory("marathon training")
-
-6. **To save new conversational insights**:
-   → Use manage_memory(content)
-   → Save contextual information, preferences, conversation summaries
-   → Example: "Customer mentioned training for a marathon"
-
-WORKFLOW EXAMPLE:
-- User: "I wear size 8 Nike shoes"
-- Step 1: update_customer_profile('{customer_id}', {{"shoe_size": 8, "preferred_brands": ["Nike"]}})
-- Step 2: manage_memory("Customer prefers Nike brand and wears size 8")
-- Response: "Got it! I've saved that you wear size 8 and prefer Nike. I'll remember this for next time!"
-
-- User: "What's my shoe size?"
-- Step 1: get_customer_profile('{customer_id}')
-- Step 2: Read shoe_size from the returned profile
-- Response: "Your shoe size is 8!"
-
-GUIDELINES:
-- Be friendly, helpful, and professional
-- Reference past information naturally when relevant
-- Make personalized recommendations based on preferences
-- Ask clarifying questions when needed
-- Always use the appropriate tool for the type of information requested
-"""
-
-        # Initialize LLM
-        llm = ChatAnthropic(
-            model=config.llm.model,
-            temperature=config.llm.temperature,
-            max_tokens=config.llm.max_tokens,
-            api_key=config.llm.anthropic_api_key
-        )
-
-        # Import and bind all tools
-        from src.agent.tools import (
-            search_products,
-            get_customer_profile,
-            update_customer_profile,
-            get_purchase_history
-        )
-
-        tools = [
-            get_customer_profile,
-            update_customer_profile,
-            search_products,
-            get_purchase_history,
-            manage_memory,
-            search_memory
-        ]
-
-        llm_with_tools = llm.bind_tools(tools)
-
-        # Prepare messages with system prompt
-        full_messages = [
-            {"role": "system", "content": system_prompt}
-        ]
-
-        # Add conversation messages
-        for msg in messages:
-            if hasattr(msg, 'content'):
-                if msg.__class__.__name__ == 'HumanMessage':
-                    full_messages.append(
-                        {"role": "user", "content": msg.content})
-                elif msg.__class__.__name__ == 'AIMessage':
-                    full_messages.append(
-                        {"role": "assistant", "content": msg.content})
-
-        # Get response from LLM
-        response = llm_with_tools.invoke(full_messages)
-
-        # Handle tool calls if present
-        if hasattr(response, 'tool_calls') and response.tool_calls:
-            logger.info(
-                f"Agent wants to call {len(response.tool_calls)} tool(s)")
-
-            # Execute each tool call
-            tool_results = []
-            for tool_call in response.tool_calls:
-                tool_name = tool_call['name']
-                tool_args = tool_call['args']
-
-                logger.info(
-                    f"Executing tool: {tool_name} with args: {tool_args}")
-
-                # Find and execute the tool
-                tool_to_execute = None
-                for tool in tools:
-                    if tool.name == tool_name:
-                        tool_to_execute = tool
-                        break
-
-                if tool_to_execute:
-                    try:
-                        result = tool_to_execute.invoke(tool_args)
-                        tool_results.append({
-                            "tool_call_id": tool_call['id'],
-                            "result": result
-                        })
-                        logger.info(f"Tool {tool_name} executed successfully")
-                    except Exception as e:
-                        logger.error(f"Error executing tool {tool_name}: {e}")
-                        tool_results.append({
-                            "tool_call_id": tool_call['id'],
-                            "error": str(e)
-                        })
-
-            # Create tool result messages
-            from langchain_core.messages import ToolMessage
-            tool_messages = []
-            for tr in tool_results:
-                tool_messages.append(
-                    ToolMessage(
-                        content=str(tr.get("result", tr.get("error"))),
-                        tool_call_id=tr["tool_call_id"]
-                    )
-                )
-
-            # Add original response and tool results to messages
-            state["messages"] = messages + [response] + tool_messages
-
-            # Get final response after tool execution
-            final_response = llm_with_tools.invoke(
-                full_messages + [
-                    {"role": "assistant", "content": response.content,
-                        "tool_calls": response.tool_calls}
-                ] + [
-                    {"role": "tool", "content": str(
-                        tm.content), "tool_call_id": tm.tool_call_id}
-                    for tm in tool_messages
-                ]
-            )
-
-            state["messages"] = state["messages"] + [final_response]
-        else:
-            # No tool calls, just add the response
-            state["messages"] = messages + [response]
-
-        logger.info("Agent response generated successfully")
-        return state
-
-    except Exception as e:
-        logger.error(f"Error in agent_node: {e}")
-        import traceback
-        traceback.print_exc()
-
-        # Add error message to conversation
-        error_message = AIMessage(
-            content="I apologize, but I encountered an error. Please try again."
-        )
-        state["messages"] = state["messages"] + [error_message]
-        return state
-
-
-def agent_node_b(state: AgentState, store: MongoDBStore) -> AgentState:
-    """Main agent node - simplified version"""
-    try:
-        from langchain_core.messages import AIMessage
-        from langchain.chat_models import init_chat_model
-
-        customer_id = state["customer_id"]
-        messages = state["messages"]
-
-        logger.info(f"Agent processing query for customer {customer_id}")
-
-        # Simple system prompt without memories for now
-        system_prompt = """You are a helpful store associate at a retail store.
-        Be friendly, helpful, and professional."""
-
-        # Initialize LLM
-        model = init_chat_model(
-            config.llm.model,
-            temperature=config.llm.temperature,
-            max_tokens=config.llm.max_tokens
-        )
-
-        # Get response from LLM
-        from langchain_core.messages import SystemMessage
-        llm_messages = [SystemMessage(content=system_prompt)] + messages
-        response = model.invoke(llm_messages)
-
-        # Add response to messages
-        state["messages"] = messages + [response]
-
-        logger.info("Agent response generated successfully")
-        return state
-
-    except Exception as e:
-        logger.error(f"Error in agent_node: {e}")
-        from langchain_core.messages import AIMessage
-        error_message = AIMessage(
-            content="I apologize, but I encountered an error. Please try again."
-        )
-        state["messages"] = state["messages"] + [error_message]
-        return state
-
-
-def _build_memory_context(episodic, semantic, insights) -> str:
-    """
-    Build a formatted memory context string for the LLM.
-
-    Args:
-        episodic: List of episodic memories
-        semantic: List of semantic memories
-        insights: List of consolidated insights
-
-    Returns:
-        Formatted string with memory context
-    """
-    context_parts = []
-
-    # Add episodic memories
-    if episodic:
-        context_parts.append("## Past Interactions:")
-        for memory in episodic[:2]:  # Limit to 2 most relevant
-            context_parts.append(f"- {memory.value.get('summary', 'N/A')}")
-
-    # Add semantic preferences
-    if semantic:
-        context_parts.append("\n## Customer Preferences:")
-        for memory in semantic[:5]:  # Limit to 5 most relevant
-            pref_type = memory.value.get('preference_type', 'unknown')
-            value = memory.value.get('value', 'N/A')
-            context_parts.append(f"- {pref_type}: {value}")
-
-    # Add consolidated insights
-    if insights:
-        context_parts.append("\n## Behavioral Patterns:")
-        for insight in insights[:2]:  # Limit to 2 most relevant
-            pattern = insight.value.get('pattern', 'N/A')
-            context_parts.append(f"- {pattern}")
-
-    return "\n".join(context_parts) if context_parts else "No previous memory available."
 
 
 def extract_semantic_memories_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
-    Extract semantic memories from the conversation (real-time).
-
-    This node runs during the conversation (hot path) to capture
-    important facts and preferences as they're mentioned.
-
-    Args:
-        state: Current agent state
-        store: MongoDBStore for storing memories
-
-    Returns:
-        Updated state (unchanged, memories stored in background)
+    Extract semantic memories from conversation.
+    Currently simplified - agent handles via tools.
     """
-    try:
-        customer_id = state["customer_id"]
-        messages = state["messages"]
-
-        # Only process if we have recent messages
-        if len(messages) < 2:
-            return state
-
-        logger.info("Extracting semantic memories from recent messages")
-
-        # Get semantic memory manager
-        semantic_manager = MemoryManagers.get_semantic_manager()
-
-        # Extract memories from last 2 messages (user + assistant)
-        recent_messages = messages[-2:]
-        extracted_memories = semantic_manager.extract_memories(
-            messages=recent_messages
-        )
-
-        logger.info(f"Extracted {len(extracted_memories)} semantic memories")
-
-        # Store each memory in the preferences namespace
-        for memory in extracted_memories:
-            store.put(
-                namespace=("customers", customer_id, "preferences"),
-                key=memory.preference_type,
-                value={
-                    "preference_type": memory.preference_type,
-                    "value": memory.value,
-                    "confidence": memory.confidence,
-                    "source": memory.source,
-                    "first_observed": memory.first_observed.isoformat(),
-                    "last_confirmed": memory.last_confirmed.isoformat(),
-                    "times_observed": memory.times_observed
-                }
-            )
-
-            logger.info(
-                f"Stored preference: {memory.preference_type} = {memory.value}"
-            )
-
-        return state
-
-    except Exception as e:
-        logger.error(f"Error in extract_semantic_memories_node: {e}")
-        # Don't fail the flow on memory extraction errors
-        return state
+    logger.info("Extract memories node (agent manages memory via tools)")
+    return state
 
 
 def create_episode_node(state: AgentState, store: MongoDBStore) -> AgentState:
     """
-    Create an episode summary when the conversation ends.
-
-    This node runs when session_active becomes False. It:
-    1. Summarizes the entire conversation
-    2. Extracts key information
-    3. Stores the episode with embeddings for future search
-
-    Args:
-        state: Current agent state
-        store: MongoDBStore for storing episodes
-
-    Returns:
-        Updated state (unchanged, episode stored in background)
+    Create an episode summary when conversation ends.
     """
     try:
-        # Only create episode if session is ending
         if state.get("session_active", True):
             return state
-
+        
         customer_id = state["customer_id"]
         messages = state["messages"]
-
+        
         logger.info(f"Creating episode summary for customer {customer_id}")
+        
+        # Skip if no meaningful messages
+        if len(messages) < 2:
+            logger.info("Not enough messages to create episode")
+            return state
+        
+        episode_key = f"episode_{uuid.uuid4().hex[:8]}"
+        
+        # Extract conversation preview (last 10 messages)
+        message_previews = []
+        for msg in messages[-10:]:
+            if hasattr(msg, 'content') and msg.content:
+                # Handle both string and list content
+                if isinstance(msg.content, str):
+                    content = msg.content[:100]
+                elif isinstance(msg.content, list):
+                    # Extract text from content blocks
+                    text_parts = []
+                    for block in msg.content:
+                        if isinstance(block, dict) and block.get('type') == 'text':
+                            text_parts.append(block.get('text', ''))
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                    content = ' '.join(text_parts)[:100]
+                else:
+                    continue
+                
+                if content.strip():
+                    message_previews.append(content.strip())
 
-        # Get episode memory manager
-        episode_manager = MemoryManagers.get_episode_manager()
-
-        # Extract episode from full conversation
-        episodes = episode_manager.extract_memories(messages=messages)
-
-        if not episodes:
-            logger.warning("No episode extracted from conversation")
+        if not message_previews:
+            logger.info("No content to create episode from")
             return state
 
-        # Take the first (and typically only) episode
-        episode = episodes[0]
+        conversation_preview = " | ".join(message_previews)
 
-        logger.info(f"Episode summary: {episode.summary[:100]}...")
-
-        # Store episode in MongoDB
-        episode_key = f"episode_{datetime.now().isoformat()}"
-
+        # Create summary with substantial text
+        episode_summary = {
+            "date": datetime.now().isoformat(),
+            "summary": f"Conversation with {len(messages)} messages. Topics discussed: {conversation_preview}",
+            "message_count": len(messages),
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Store without embeddings to avoid empty list error
         store.put(
             namespace=("customers", customer_id, "episodes"),
             key=episode_key,
-            value={
-                "date": episode.date,
-                "summary": episode.summary,
-                "customer_needs": episode.customer_needs,
-                "products_discussed": episode.products_discussed,
-                "outcome": episode.outcome,
-                "key_insights": episode.key_insights,
-                "sentiment": episode.sentiment,
-                "duration_minutes": episode.duration_minutes,
-                "associate_id": episode.associate_id,
-                "created_at": datetime.now().isoformat()
-            },
-            index=True  # Enable vector search on this episode
+            value=episode_summary,
+            index=False  # Disable vector indexing to avoid embedding errors
         )
-
+        
         logger.info(f"Episode stored successfully: {episode_key}")
-
         return state
-
+        
     except Exception as e:
         logger.error(f"Error in create_episode_node: {e}")
-        # Don't fail the flow on episode creation errors
+        import traceback
+        traceback.print_exc()
         return state
